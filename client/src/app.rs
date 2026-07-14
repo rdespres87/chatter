@@ -56,7 +56,7 @@ enum InputMode {
 }
 
 impl App {
-    pub async fn new(url: String) -> color_eyre::Result<Self> {
+    pub async fn new(url: String, default_user: Option<String>) -> color_eyre::Result<Self> {
         const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
         let connect = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(url.as_str()));
         let (ws_stream, _) = match connect.await {
@@ -79,10 +79,10 @@ impl App {
             messages: Vec::new(),
             message_offset: 0,
             write,
-            login: String::new(),
+            login: default_user.clone().unwrap_or_default(),
             room: "general".to_string(),
             logged_in: false,
-            login_input: String::new(),
+            login_input: default_user.unwrap_or_default(),
             login_character_index: 0,
             password_input: String::new(),
             password_character_index: 0,

@@ -98,7 +98,7 @@ RUST_LOG=server::account=info,cargo_run=warn cargo run -p server
 
 #### Client
 
-The client has no command-line arguments. Server connection is configured via the default URL:
+The client has no command-line arguments. Server connection is configured via the :
 
 ```bash
 # Default: connect to ws://localhost:8080

@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    env,
     net::SocketAddr,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -8,6 +7,8 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+use clap::Parser;
 
 use futures_channel::mpsc::UnboundedSender;
 use futures_util::{StreamExt, future, pin_mut, stream::TryStreamExt};
@@ -724,17 +725,29 @@ async fn handle_connection(
     Ok(())
 }
 
+/// Server CLI arguments.
+#[derive(Parser, Debug)]
+#[command(name = "chatter-server", about = "WebSocket chat server")]
+struct Cli {
+    /// Host to bind the server to.
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+
+    /// Port to listen on.
+    #[arg(short, long, default_value_t = 8080)]
+    port: u16,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     warn!("{}", TRANSPORT_SECURITY_NOTICE);
 
     let account_db =
         Account::new("chatter.db".to_string()).context("Failed to initialize database")?;
 
-    let addr = env::args()
-        .nth(1)
-        .unwrap_or_else(|| "127.0.0.1:8080".to_string());
+    let addr = format!("{}:{}", cli.host, cli.port);
 
     let state: PeerMap = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
