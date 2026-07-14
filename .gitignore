@@ -1,0 +1,19 @@
+# Build artifacts
+target/
+**/debug/
+**/release/
+
+# Database file (created by server)
+chatter.db
+chatter.db-shm
+chatter.db-wal
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

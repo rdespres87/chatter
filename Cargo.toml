@@ -1,0 +1,13 @@
+[workspace]
+members = ["client", "server", "protocol"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Romuald DESPRES <xxx.yyy@zzz.fr>"]
+edition = "2024"
+description = "A client server chat"
+documentation = "https://***"
+repository = "https://github.com/rdespres87/chatter"
+readme = "README.md"
+license = "MIT"
