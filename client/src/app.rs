@@ -152,8 +152,8 @@ impl App {
 
     async fn handle_entering_login(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Enter => {
-                if !self.login_input.is_empty() {
+            KeyCode::Enter
+                if !self.login_input.is_empty() => {
                     self.login = self.login_input.clone();
                     self.messages.push(format!(
                         "[System] Entering password for '{}'...",
@@ -161,7 +161,6 @@ impl App {
                     ));
                     self.input_mode = InputMode::EnteringPassword;
                 }
-            }
             KeyCode::Char(c) if key.kind == KeyEventKind::Press => {
                 Self::do_enter_char(c, &mut self.login_character_index, &mut self.login_input);
             }
@@ -189,8 +188,8 @@ impl App {
 
     async fn handle_entering_password(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Enter => {
-                if !self.password_input.is_empty() {
+            KeyCode::Enter
+                if !self.password_input.is_empty() => {
                     let passwd = self.password_input.clone();
                     self.password_input.clear();
                     self.password_character_index = 0;
@@ -231,7 +230,6 @@ impl App {
                         }
                     }
                 }
-            }
             KeyCode::Char(c) if key.kind == KeyEventKind::Press => {
                 Self::do_enter_char(
                     c,
@@ -264,24 +262,22 @@ impl App {
             KeyCode::Enter => {
                 self.input_mode = InputMode::Editing;
             }
-            KeyCode::Up => {
-                if self.message_offset > 0 {
+            KeyCode::Up
+                if self.message_offset > 0 => {
                     self.message_offset -= 1;
                 }
-            }
-            KeyCode::Down => {
-                if self.message_offset < self.messages.len().saturating_sub(1) {
+            KeyCode::Down
+                if self.message_offset < self.messages.len().saturating_sub(1) => {
                     self.message_offset += 1;
                 }
-            }
             _ => {}
         }
     }
 
     async fn handle_editing_keys(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Enter => {
-                if !self.input.is_empty() {
+            KeyCode::Enter
+                if !self.input.is_empty() => {
                     let msg = self.input.clone();
                     self.messages.push(format!("[me] {}", msg));
                     if let Err(e) = self
@@ -296,7 +292,6 @@ impl App {
                     self.input.clear();
                     self.character_index = 0;
                 }
-            }
             KeyCode::Char(c) => {
                 Self::do_enter_char(c, &mut self.character_index, &mut self.input);
             }
@@ -318,20 +313,17 @@ impl App {
 
     async fn handle_room_navigation(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Up => {
-                if self.room_selected > 0 {
+            KeyCode::Up
+                if self.room_selected > 0 => {
                     self.room_selected -= 1;
                 }
-            }
-            KeyCode::Down => {
-                if self.room_selected < self.rooms.len().saturating_sub(1) {
+            KeyCode::Down
+                if self.room_selected < self.rooms.len().saturating_sub(1) => {
                     self.room_selected += 1;
                 }
-            }
             KeyCode::Enter => {
                 if let Some(room) = self.rooms.get(self.room_selected).cloned() {
                     self.join_room(room).await;
-                    return;
                 }
             }
             KeyCode::Tab | KeyCode::Esc => {
@@ -346,8 +338,8 @@ impl App {
 
     async fn join_room(&mut self, room: String) {
         if self.room != room {
-            if !self.room.is_empty() {
-                if let Err(e) = self
+            if !self.room.is_empty()
+                && let Err(e) = self
                     .send_client_message(chatter_protocol::ClientMessage::LeaveRoom {
                         room: self.room.clone(),
                     })
@@ -355,7 +347,6 @@ impl App {
                 {
                     log::error!("Leave room error: {}", e);
                 }
-            }
             self.messages.clear();
             self.message_offset = 0;
         }
@@ -443,28 +434,25 @@ impl App {
             terminal.draw(|frame| self.view(frame))?;
 
             match self.events.next().await? {
-                Event::Crossterm(event) => match event {
-                    crossterm::event::Event::Key(key) => match self.input_mode {
-                        InputMode::Splash => self.handle_splash_keys(key),
-                        InputMode::EnteringLogin => self.handle_entering_login(key).await,
-                        InputMode::EnteringPassword => self.handle_entering_password(key).await,
-                        InputMode::Normal => {
-                            if key.code == KeyCode::Tab {
-                                self.input_mode = InputMode::RoomList;
-                            } else {
-                                self.handle_normal_keys(key);
-                            }
+                Event::Crossterm(event) => if let crossterm::event::Event::Key(key) = event { match self.input_mode {
+                    InputMode::Splash => self.handle_splash_keys(key),
+                    InputMode::EnteringLogin => self.handle_entering_login(key).await,
+                    InputMode::EnteringPassword => self.handle_entering_password(key).await,
+                    InputMode::Normal => {
+                        if key.code == KeyCode::Tab {
+                            self.input_mode = InputMode::RoomList;
+                        } else {
+                            self.handle_normal_keys(key);
                         }
-                        InputMode::RoomList => {
-                            self.handle_room_navigation(key).await;
-                        }
-                        InputMode::Editing if key.kind == KeyEventKind::Press => {
-                            self.handle_editing_keys(key).await
-                        }
-                        InputMode::Editing => {}
-                    },
-                    _ => {}
-                },
+                    }
+                    InputMode::RoomList => {
+                        self.handle_room_navigation(key).await;
+                    }
+                    InputMode::Editing if key.kind == KeyEventKind::Press => {
+                        self.handle_editing_keys(key).await
+                    }
+                    InputMode::Editing => {}
+                } },
                 Event::App(AppEvent::Quit) => self.quit(),
                 Event::App(AppEvent::Disconnected) => {
                     self.messages

@@ -187,7 +187,7 @@ impl Account {
     pub fn get_rooms(&self) -> Result<Vec<String>> {
         let conn = self.lock_connection();
         let mut stmt = conn.prepare("SELECT DISTINCT room FROM messages ORDER BY room")?;
-        let rooms = stmt.query_map([], |row| Ok(row.get::<_, String>(0)?))?;
+        let rooms = stmt.query_map([], |row| row.get::<_, String>(0))?;
 
         let mut result = Vec::new();
         // Always include default rooms
@@ -207,7 +207,7 @@ impl Account {
     pub fn list_accounts(&self) -> Result<()> {
         let conn = self.lock_connection();
         let mut stmt = conn.prepare("SELECT name FROM account")?;
-        let accounts = stmt.query_map([], |row| Ok(row.get::<_, String>(0)?))?;
+        let accounts = stmt.query_map([], |row| row.get::<_, String>(0))?;
 
         for account in accounts {
             println!("Found account: {}", account.unwrap());

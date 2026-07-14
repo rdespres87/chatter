@@ -28,7 +28,7 @@ struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = ratatui::restore();
+        ratatui::restore();
     }
 }
 
@@ -89,7 +89,7 @@ async fn main() -> color_eyre::Result<()> {
     let _guard = TerminalGuard;
 
     // Run the app — terminal is consumed, its Drop calls restore().
-    let result = app.run(terminal).await;
+    
 
-    result
+    app.run(terminal).await
 }

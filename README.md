@@ -62,59 +62,66 @@ cargo build --release
 
 #### Server
 
-The server accepts a single positional argument for the bind address:
+The server accepts CLI arguments for host, port, and database path:
 
 ```bash
 # Default: listen on 127.0.0.1:8080, database stored in chatter.db
 cargo run -p server
 
-# Custom bind address (e.g., all interfaces on port 9000)
-cargo run -p server -- 0.0.0.0:9000
+# Custom host and port
+cargo run -p server -- --host 0.0.0.0 --port 9000
 
-# Bind to a specific interface and port
-cargo run -p server -- 192.168.1.10:8080
+# Bind to a specific interface (all interfaces on default port)
+cargo run -p server -- --host 0.0.0.0
 ```
 
-**Server configuration:**
+**Server CLI options:**
 
-| Setting | Value | Description |
-|---------|-------|-------------|
-| Bind address | `127.0.0.1:8080` (default) | First positional argument to the server binary |
-| Database file | `chatter.db` | SQLite database path, stored in the current directory |
-| Log level | `info` (default) | Controlled via `RUST_LOG` environment variable |
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--host` | `127.0.0.1` | Host to bind the server to |
+| `--port` | `8080` | Port to listen on |
 
 **Log levels:**
 
 ```bash
 # Verbose logging (debug + trace)
-RUST_LOG=debug cargo run -p server
+RUST_LOG=debug cargo run -p server -- --host 127.0.0.1 --port 8080
 
 # Only warnings and errors
 RUST_LOG=warn cargo run -p server
 
 # Specific module logging
-RUST_LOG=server::account=info,cargo_run=warn cargo run -p server
+RUST_LOG=server::account=info cargo run -p server
 ```
 
 #### Client
 
-The client has no command-line arguments. Server connection is configured via the :
+The client accepts CLI arguments for server URL, port, and username:
 
 ```bash
-# Default: connect to ws://localhost:8080
+# Default: connect to ws://localhost:8080 with interactive login
 cargo run -p client
 
 # Connect to a custom server address
+cargo run -p client -- --url ws://192.168.1.10:9000
 
-# Connect to a remote server
+# Specify username for automatic login
+cargo run -p client -- --user alice
+
+# Combine URL and port
+cargo run -p client -- --url ws://192.168.1.10:9000 --user bob
 ```
 
-**Client configuration:**
+**Client CLI options:**
 
-| Setting | Value | Description |
-|---------|-------|-------------|
-| Server URL | `ws://localhost:8080` (default) | Set via  |
-| Log level | `warn` (hardcoded) | Only warnings and errors are shown in the TUI |
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--url` | `ws://localhost:8080` | WebSocket server URL |
+| `-p, --port` | (extracted from URL) | Server port (overrides URL port) |
+| `--user` | (interactive prompt) | Username for automatic login |
+
+**Note:** The `--url` option takes precedence over `--port`. If only `--port` is provided, it overrides the corresponding value in the URL.
 
 ### Running Tests
 
