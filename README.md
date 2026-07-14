@@ -58,15 +58,63 @@ Terminal UI chat client built with:
 ```bash
 # Build the entire workspace
 cargo build --release
-
-# Run the server
-cargo run -p server
-
-# In another terminal, run the client
-cargo run -p client
 ```
 
-The server listens on `ws://localhost:8080` by default. The client connects to this address automatically.
+#### Server
+
+The server accepts a single positional argument for the bind address:
+
+```bash
+# Default: listen on 127.0.0.1:8080, database stored in chatter.db
+cargo run -p server
+
+# Custom bind address (e.g., all interfaces on port 9000)
+cargo run -p server -- 0.0.0.0:9000
+
+# Bind to a specific interface and port
+cargo run -p server -- 192.168.1.10:8080
+```
+
+**Server configuration:**
+
+| Setting | Value | Description |
+|---------|-------|-------------|
+| Bind address | `127.0.0.1:8080` (default) | First positional argument to the server binary |
+| Database file | `chatter.db` | SQLite database path, stored in the current directory |
+| Log level | `info` (default) | Controlled via `RUST_LOG` environment variable |
+
+**Log levels:**
+
+```bash
+# Verbose logging (debug + trace)
+RUST_LOG=debug cargo run -p server
+
+# Only warnings and errors
+RUST_LOG=warn cargo run -p server
+
+# Specific module logging
+RUST_LOG=server::account=info,cargo_run=warn cargo run -p server
+```
+
+#### Client
+
+The client has no command-line arguments. Server connection is configured via the default URL:
+
+```bash
+# Default: connect to ws://localhost:8080
+cargo run -p client
+
+# Connect to a custom server address
+
+# Connect to a remote server
+```
+
+**Client configuration:**
+
+| Setting | Value | Description |
+|---------|-------|-------------|
+| Server URL | `ws://localhost:8080` (default) | Set via  |
+| Log level | `warn` (hardcoded) | Only warnings and errors are shown in the TUI |
 
 ### Running Tests
 
