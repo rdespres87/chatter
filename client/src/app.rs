@@ -31,7 +31,7 @@ pub struct App {
     input_mode: InputMode,
     messages: Vec<String>,
     message_offset: usize,
-    write: Arc<Mutex<futures::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>,
+    write: Arc<tokio::sync::Mutex<Option<futures::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>>,
     login: String,
     room: String,
     logged_in: bool,
@@ -77,12 +77,12 @@ impl App {
             ),
         };
         let (write, read) = ws_stream.split();
-        let write = Arc::new(Mutex::new(write));
+        let write = Arc::new(Mutex::new(Some(write)));
 
         Ok(Self {
             url,
             running: true,
-            events: EventHandler::new(read, write.clone()),
+            events: EventHandler::connected(read, write.clone()).await,
             input: String::new(),
             character_index: 0,
             input_mode: InputMode::Splash,
@@ -138,7 +138,9 @@ impl App {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let json = chatter_protocol::serialize_client_message(&message)?;
         let mut write = self.write.lock().await;
-        write.send(Message::Text(json.into())).await?;
+        if let Some(ref mut sink) = *write {
+            sink.send(Message::Text(json.into())).await?;
+        }
         Ok(())
     }
 
@@ -447,8 +449,8 @@ impl App {
         match connect.await {
             Ok(Ok((ws_stream, _))) => {
                 let (write, read) = ws_stream.split();
-                self.write = Arc::new(Mutex::new(write));
-                self.events = crate::events::EventHandler::new(read, self.write.clone());
+                self.write = Arc::new(Mutex::new(Some(write)));
+                self.events = crate::events::EventHandler::connected(read, self.write.clone()).await;
 
                 self.reset_session_after_reconnect();
                 true
