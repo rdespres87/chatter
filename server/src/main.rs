@@ -61,7 +61,7 @@ impl Peer {
     }
 }
 
-type PeerMap = Arc<std::sync::Mutex<HashMap<SocketAddr, Peer>>>;
+type PeerMap = Arc<std::sync::RwLock<HashMap<SocketAddr, Peer>>>;
 
 type ServerResult = std::result::Result<(), anyhow::Error>;
 
@@ -432,8 +432,8 @@ pub(crate) fn send_server_message(
         .context("Failed to serialize message")?;
     let tx = {
         let peers = peer_map
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
+            .read()
+            .map_err(|e| anyhow::anyhow!("RwLock poisoned: {}", e))?;
         peers.get(&addr).map(|peer| peer.tx.clone())
     };
 
@@ -488,8 +488,8 @@ pub(crate) fn broadcast_to_room(
         .context("Failed to serialize message")?;
     let recipients: Vec<Tx> = {
         let peers = peer_map
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
+            .read()
+            .map_err(|e| anyhow::anyhow!("RwLock poisoned: {}", e))?;
         peers
             .iter()
             .filter_map(|(peer_addr, peer)| {
@@ -578,7 +578,7 @@ fn account_backoff_remaining(
     peer_map: &PeerMap,
     addr: SocketAddr,
 ) -> std::result::Result<Option<Duration>, chatter_protocol::ServerMessage> {
-    let peers = peer_map.lock().map_err(|_| lock_peer_error())?;
+    let peers = peer_map.read().map_err(|_| lock_peer_error())?;
     let peer = peers.get(&addr).ok_or_else(session_not_found_error)?;
     Ok(peer.next_account_attempt.and_then(|next_attempt| {
         next_attempt.checked_duration_since(Instant::now())
@@ -589,7 +589,7 @@ fn record_account_failure(
     peer_map: &PeerMap,
     addr: SocketAddr,
 ) -> std::result::Result<(), chatter_protocol::ServerMessage> {
-    let mut peers = peer_map.lock().map_err(|_| lock_peer_error())?;
+    let mut peers = peer_map.write().map_err(|_| lock_peer_error())?;
     let peer = peers.get_mut(&addr).ok_or_else(session_not_found_error)?;
     peer.login_failures = peer.login_failures.saturating_add(1);
     peer.next_account_attempt = Some(Instant::now() + account_backoff_duration(peer.login_failures));
@@ -600,7 +600,7 @@ fn clear_account_failures(
     peer_map: &PeerMap,
     addr: SocketAddr,
 ) -> std::result::Result<(), chatter_protocol::ServerMessage> {
-    let mut peers = peer_map.lock().map_err(|_| lock_peer_error())?;
+    let mut peers = peer_map.write().map_err(|_| lock_peer_error())?;
     let peer = peers.get_mut(&addr).ok_or_else(session_not_found_error)?;
     peer.login_failures = 0;
     peer.next_account_attempt = None;
@@ -612,7 +612,7 @@ fn set_authenticated_peer(
     addr: SocketAddr,
     login: String,
 ) -> std::result::Result<Option<(String, Vec<String>)>, chatter_protocol::ServerMessage> {
-    let mut peers = peer_map.lock().map_err(|_| lock_peer_error())?;
+    let mut peers = peer_map.write().map_err(|_| lock_peer_error())?;
 
     // If this login is already used by a different peer, kick the old one
     let old_addr = peers.iter()
@@ -673,7 +673,7 @@ fn join_peer_room(
     addr: SocketAddr,
     room: String,
 ) -> std::result::Result<(), chatter_protocol::ServerMessage> {
-    let mut peers = peer_map.lock().map_err(|_| lock_peer_error())?;
+    let mut peers = peer_map.write().map_err(|_| lock_peer_error())?;
     let peer = peers.get_mut(&addr).ok_or_else(session_not_found_error)?;
     peer.rooms.insert(room);
     Ok(())
@@ -684,7 +684,7 @@ fn leave_peer_room(
     addr: SocketAddr,
     room: &str,
 ) -> std::result::Result<(), chatter_protocol::ServerMessage> {
-    let mut peers = peer_map.lock().map_err(|_| lock_peer_error())?;
+    let mut peers = peer_map.write().map_err(|_| lock_peer_error())?;
     let peer = peers.get_mut(&addr).ok_or_else(session_not_found_error)?;
     peer.rooms.remove(room);
     Ok(())
@@ -694,7 +694,7 @@ fn authenticated_login(
     peer_map: &PeerMap,
     addr: SocketAddr,
 ) -> std::result::Result<String, chatter_protocol::ServerMessage> {
-    let peers = peer_map.lock().map_err(|_| lock_peer_error())?;
+    let peers = peer_map.read().map_err(|_| lock_peer_error())?;
     let login = peers
         .get(&addr)
         .map(|peer| peer.login.clone())
@@ -712,7 +712,7 @@ fn peer_is_in_room(
     addr: SocketAddr,
     room: &str,
 ) -> std::result::Result<bool, chatter_protocol::ServerMessage> {
-    let peers = peer_map.lock().map_err(|_| lock_peer_error())?;
+    let peers = peer_map.read().map_err(|_| lock_peer_error())?;
     let peer = peers.get(&addr).ok_or_else(session_not_found_error)?;
     Ok(peer.rooms.contains(room))
 }
@@ -735,8 +735,8 @@ async fn handle_connection(
 
     let (tx, rx) = futures_channel::mpsc::unbounded();
     peer_map
-        .lock()
-        .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?
+        .write()
+        .map_err(|e| anyhow::anyhow!("RwLock poisoned: {}", e))?
         .insert(
             addr,
             Peer::new(tx, RESERVED_ANONYMOUS_LOGIN.to_string(), HashSet::new()),
@@ -787,8 +787,8 @@ async fn handle_connection(
 
     info!("{} disconnected", addr);
     let disconnected_peer = peer_map
-        .lock()
-        .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?
+        .write()
+        .map_err(|e| anyhow::anyhow!("RwLock poisoned: {}", e))?
         .remove(&addr);
     if let Some(peer) = disconnected_peer {
         for room in peer.rooms {
@@ -830,7 +830,7 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = format!("{}:{}", cli.host, cli.port);
 
-    let state: PeerMap = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let state: PeerMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
 
     let listener = TcpListener::bind(&addr)
         .await
@@ -857,9 +857,9 @@ mod tests {
     use futures_util::StreamExt;
 
     fn make_peer_map(peers: Vec<(SocketAddr, Tx, String, Vec<String>)>) -> PeerMap {
-        let map = std::sync::Mutex::new(HashMap::new());
+        let map = std::sync::RwLock::new(HashMap::new());
         {
-            let mut peers_guard = map.lock().unwrap();
+            let mut peers_guard = map.write().unwrap();
             for (addr, tx, login, rooms) in peers {
                 peers_guard.insert(
                     addr,
@@ -994,10 +994,10 @@ mod tests {
 
     #[test]
     fn test_peer_is_in_room_propagates_poison() {
-        let peer_map: PeerMap = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let peer_map: PeerMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let poisoned = peer_map.clone();
         let _ = std::thread::spawn(move || {
-            let _guard = poisoned.lock().unwrap();
+            let _guard = poisoned.write().unwrap();
             panic!("poison peer map");
         })
         .join();
@@ -1032,7 +1032,7 @@ mod tests {
             }
         );
         assert_eq!(
-            peer_map.lock().unwrap().get(&addr).unwrap().login,
+            peer_map.read().unwrap().get(&addr).unwrap().login,
             "anonymous",
             "Creating an account must not authenticate the peer"
         );
@@ -1056,7 +1056,7 @@ mod tests {
             }
         );
         assert_eq!(
-            peer_map.lock().unwrap().get(&addr).unwrap().login,
+            peer_map.read().unwrap().get(&addr).unwrap().login,
             "anonymous",
             "Duplicate account creation must not authenticate the peer"
         );
@@ -1116,7 +1116,7 @@ mod tests {
                 login: "new-login".to_string(),
             }
         );
-        let peer = peer_map.lock().unwrap().get(&addr).unwrap().clone();
+        let peer = peer_map.read().unwrap().get(&addr).unwrap().clone();
         assert_eq!(peer.login, "new-login");
         assert!(peer.rooms.is_empty());
     }
@@ -1175,7 +1175,7 @@ mod tests {
                 reason: "Invalid credentials.".to_string(),
             }
         );
-        let peer = peer_map.lock().unwrap().get(&addr).unwrap().clone();
+        let peer = peer_map.read().unwrap().get(&addr).unwrap().clone();
         assert_eq!(peer.login, "anonymous");
         assert!(peer.rooms.is_empty());
     }
