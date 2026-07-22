@@ -14,6 +14,9 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
 use crate::events::{AppEvent, Event, EventHandler};
 
+/// Maximum number of messages to keep in the local message buffer.
+const MAX_HISTORY: usize = 500;
+
 /// Application state.
 pub struct App {
     url: String,
@@ -569,6 +572,10 @@ impl App {
                                 } else if room == self.room {
                                     self.messages.push(format!("[{}] {}", login, message));
                                 }
+                                // Trim to MAX_HISTORY (keep most recent)
+                                if self.messages.len() > MAX_HISTORY {
+                                    self.messages.drain(..self.messages.len() - MAX_HISTORY);
+                                }
                             }
                             chatter_protocol::ServerMessage::RoomList { rooms } => {
                                 self.rooms = rooms;
@@ -595,6 +602,10 @@ impl App {
                                             )
                                         })
                                         .collect();
+                                    // Trim to MAX_HISTORY (keep most recent)
+                                    if self.messages.len() > MAX_HISTORY {
+                                        self.messages.drain(..self.messages.len() - MAX_HISTORY);
+                                    }
                                     if !self.messages.is_empty() {
                                         self.message_offset = self.messages.len().saturating_sub(1);
                                     }
