@@ -572,8 +572,14 @@ impl App {
                             }
                             chatter_protocol::ServerMessage::RoomList { rooms } => {
                                 self.rooms = rooms;
-                                self.room_selected =
-                                    self.rooms.iter().position(|r| *r == self.room).unwrap_or(0);
+                                // Clamp room_selected to valid range
+                                if !self.rooms.is_empty() {
+                                    self.room_selected =
+                                        self.rooms.iter().position(|r| *r == self.room)
+                                            .unwrap_or(self.rooms.len() - 1);
+                                } else {
+                                    self.room_selected = 0;
+                                }
                             }
                             chatter_protocol::ServerMessage::RoomHistory {
                                 room: hist_room,
@@ -702,7 +708,7 @@ impl App {
 
             // Messages with scroll
             let visible = (msg_area[1].height as usize).saturating_sub(2);
-            let start = self.message_offset.saturating_sub(visible - 1);
+            let start = self.message_offset.saturating_sub(visible - 1).min(self.messages.len());
             let end = (start + visible).min(self.messages.len());
             let items: Vec<ListItem> = self.messages[start..end]
                 .iter()
@@ -712,7 +718,7 @@ impl App {
         } else {
             // Show messages even when not logged in (system messages)
             let visible = (inner[0].height as usize).saturating_sub(2);
-            let start = self.message_offset.saturating_sub(visible - 1);
+            let start = self.message_offset.saturating_sub(visible - 1).min(self.messages.len());
             let end = (start + visible).min(self.messages.len());
             let items: Vec<ListItem> = self.messages[start..end]
                 .iter()
