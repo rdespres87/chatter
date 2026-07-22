@@ -12,6 +12,10 @@ use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use unicode_width::UnicodeWidthStr;
+
 use crate::events::{AppEvent, Event, EventHandler};
 
 /// Maximum number of messages to keep in the local message buffer.
@@ -27,7 +31,7 @@ pub struct App {
     input_mode: InputMode,
     messages: Vec<String>,
     message_offset: usize,
-    write: futures::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
+    write: Arc<Mutex<futures::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>,
     login: String,
     room: String,
     logged_in: bool,
@@ -73,11 +77,12 @@ impl App {
             ),
         };
         let (write, read) = ws_stream.split();
+        let write = Arc::new(Mutex::new(write));
 
         Ok(Self {
             url,
             running: true,
-            events: EventHandler::new(read),
+            events: EventHandler::new(read, write.clone()),
             input: String::new(),
             character_index: 0,
             input_mode: InputMode::Splash,
@@ -132,7 +137,8 @@ impl App {
         message: chatter_protocol::ClientMessage,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let json = chatter_protocol::serialize_client_message(&message)?;
-        self.write.send(Message::Text(json.into())).await?;
+        let mut write = self.write.lock().await;
+        write.send(Message::Text(json.into())).await?;
         Ok(())
     }
 
@@ -375,6 +381,12 @@ impl App {
         self.running = false;
     }
 
+    /// Reset room-related state when disconnected (before reconnection attempt).
+    fn reset_room_on_disconnect(&mut self) {
+        self.room.clear();
+        self.room_selected = 0;
+    }
+
     fn reset_session_after_reconnect(&mut self) {
         self.room = "general".to_string();
         self.rooms = default_rooms();
@@ -435,8 +447,8 @@ impl App {
         match connect.await {
             Ok(Ok((ws_stream, _))) => {
                 let (write, read) = ws_stream.split();
-                self.write = write;
-                self.events = crate::events::EventHandler::new(read);
+                self.write = Arc::new(Mutex::new(write));
+                self.events = crate::events::EventHandler::new(read, self.write.clone());
 
                 self.reset_session_after_reconnect();
                 true
@@ -516,6 +528,7 @@ impl App {
                 Event::App(AppEvent::Disconnected) => {
                     self.messages
                         .push("[System] Disconnected from server.".to_string());
+                    self.reset_room_on_disconnect();
                     if !self.reconnect().await {
                         break;
                     }
@@ -611,10 +624,8 @@ impl App {
                                     }
                                 }
                             }
-                            chatter_protocol::ServerMessage::Error { message } => {
-                                // The current protocol represents "not authenticated" as
-                                // Error("Login required.") rather than a dedicated enum variant.
-                                if is_not_authenticated_error(&message) {
+                            chatter_protocol::ServerMessage::Error { message, code } => {
+                                if is_not_authenticated_error(&code) {
                                     self.messages.push(
                                         "[System] Session expired. Please login again.".into(),
                                     );
@@ -786,17 +797,22 @@ impl App {
         match self.input_mode {
             InputMode::Normal | InputMode::RoomList => {}
             InputMode::Editing => frame.set_cursor_position(Position::new(
-                inner[1].x + self.character_index as u16 + 1,
+                inner[1].x + cursor_visual_x(&self.input, self.character_index),
                 inner[1].y + 1,
             )),
             InputMode::EnteringLogin => frame.set_cursor_position(Position::new(
-                inner[1].x + self.login_character_index as u16 + 1,
+                inner[1].x + cursor_visual_x(&self.login_input, self.login_character_index),
                 inner[1].y + 1,
             )),
-            InputMode::EnteringPassword => frame.set_cursor_position(Position::new(
-                inner[1].x + self.password_character_index as u16 + 1,
-                inner[1].y + 1,
-            )),
+            InputMode::EnteringPassword => {
+                // Password is masked with '*' (single-width), so char count = visual width.
+                // But we still use cursor_visual_x for consistency with the block padding.
+                let masked = "*".repeat(self.password_input.len());
+                frame.set_cursor_position(Position::new(
+                    inner[1].x + cursor_visual_x(&masked, self.password_character_index),
+                    inner[1].y + 1,
+                ));
+            }
             InputMode::Splash => {
                 frame.set_cursor_position(Position::new(inner[1].x + 1, inner[1].y + 1))
             }
@@ -812,8 +828,15 @@ fn default_rooms() -> Vec<String> {
     ]
 }
 
-fn is_not_authenticated_error(message: &str) -> bool {
-    message == "Login required."
+/// Calculate the visual column position for a cursor at `char_index` in `text`.
+fn cursor_visual_x(text: &str, char_index: usize) -> u16 {
+    text[..char_index.min(text.len())]
+        .width() as u16
+        + 1 // +1 for the text area padding inside the block
+}
+
+fn is_not_authenticated_error(code: &str) -> bool {
+    code == "NOT_AUTHENTICATED"
 }
 
 #[cfg(test)]
@@ -827,10 +850,9 @@ mod tests {
 
     #[test]
     fn not_authenticated_error_detection_is_exact() {
-        assert!(is_not_authenticated_error("Login required."));
-        assert!(!is_not_authenticated_error("Login required"));
-        assert!(!is_not_authenticated_error(
-            "Join the room before sending messages."
-        ));
+        assert!(is_not_authenticated_error("NOT_AUTHENTICATED"));
+        assert!(!is_not_authenticated_error("Login required."));
+        assert!(!is_not_authenticated_error("GENERAL"));
+        assert!(!is_not_authenticated_error("ROOM_NOT_FOUND"));
     }
 }

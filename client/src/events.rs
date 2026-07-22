@@ -1,14 +1,22 @@
 use color_eyre::eyre::OptionExt;
 use crossterm::event::Event as CrosstermEvent;
 use futures::FutureExt;
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use log::{error, info};
 use std::fmt::Debug;
+use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::protocol::Message;
+use bytes::Bytes;
+
+/// How often to send a ping frame.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How long to wait for a pong before declaring the connection dead.
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Representation of all possible events.
 #[derive(Clone, Debug)]
@@ -44,22 +52,28 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
-    /// Constructs a new instance of [`EventHandler`] and spawns two tokio tasks: one for
-    /// terminal events and one polling the web socket.
+    /// Constructs a new instance of [`EventHandler`] and spawns three tokio tasks: one for
+    /// terminal events, one polling the web socket, and one sending heartbeat pings.
     ///
     /// # Panics
     ///
     /// Panics if called outside of a tokio runtime context, as it calls [`tokio::spawn`].
     pub fn new(
         read_socket: futures::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
+        write_socket: std::sync::Arc<tokio::sync::Mutex<futures::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>,
     ) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
+        // Channel for forwarding pong frames from socket task to heartbeat task.
+        let (pong_tx, pong_rx) = mpsc::unbounded_channel();
         let event_task = EventTask::new(sender.clone());
-        let socket_task = EventSocketTask::new(read_socket, sender.clone());
+        let socket_task = EventSocketTask::new(read_socket, sender.clone(), pong_tx);
+        let heartbeat_task = HeartbeatTask::new(write_socket, sender.clone(), pong_rx);
         // Task: forward terminal events to the app.
         tokio::spawn(async { event_task.run().await });
         // Task: poll the web socket and forward received messages.
         tokio::spawn(async { socket_task.run().await });
+        // Task: send periodic pings and detect dead connections.
+        tokio::spawn(async { heartbeat_task.run().await });
         // Task: catch SIGINT (Ctrl+C) and SIGTERM (kill/systemctl stop),
         // then notify the app so it can restore the terminal before
         // the TTY is left in raw mode.
@@ -158,6 +172,8 @@ struct EventSocketTask {
     read_socket: futures::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     /// Event sender channel.
     sender: mpsc::UnboundedSender<Event>,
+    /// Pong notification channel (forwarded to heartbeat task).
+    pong_tx: mpsc::UnboundedSender<AppEvent>,
 }
 
 impl EventSocketTask {
@@ -165,10 +181,12 @@ impl EventSocketTask {
     fn new(
         read_socket: futures::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
         sender: mpsc::UnboundedSender<Event>,
+        pong_tx: mpsc::UnboundedSender<AppEvent>,
     ) -> Self {
         Self {
             read_socket,
             sender,
+            pong_tx,
         }
     }
 
@@ -188,6 +206,12 @@ impl EventSocketTask {
                     info!("Socket is closed");
                     self.send(AppEvent::Disconnected);
                     return;
+                }
+                Ok(Message::Pong(_)) => {
+                    // Forward pong to heartbeat task.
+                    let _ = self.pong_tx.send(AppEvent::ReceivedMsg {
+                        data: Message::Pong(Bytes::new()),
+                    });
                 }
                 // Intentionally ignored: the chat protocol is text-only, and tungstenite
                 // queues Pong replies to Pings internally. If the protocol ever grows
@@ -211,5 +235,92 @@ impl EventSocketTask {
         // Ignores the result because shutting down the app drops the receiver, which causes
         // the send operation to fail. This is expected behavior and should not panic.
         let _ = self.sender.send(Event::App(event));
+    }
+}
+
+/// A task that sends periodic WebSocket pings and detects dead connections.
+///
+/// Sends a ping every `HEARTBEAT_INTERVAL` seconds. If no pong is received within
+/// `HEARTBEAT_TIMEOUT` seconds, emits `AppEvent::Disconnected` to trigger reconnection.
+///
+/// The write socket is shared with the app via `Arc<Mutex>` so the app can also
+/// send messages while the heartbeat runs.
+struct HeartbeatTask {
+    /// Output web socket (used to send ping frames). Shared with the app via Arc<Mutex>.
+    write_socket: std::sync::Arc<tokio::sync::Mutex<futures::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>,
+    /// Event sender for signaling disconnection.
+    event_sender: mpsc::UnboundedSender<Event>,
+    /// Channel to receive pong notifications from the socket task.
+    pong_receiver: mpsc::UnboundedReceiver<AppEvent>,
+}
+
+impl HeartbeatTask {
+    /// Constructs a new heartbeat task.
+    fn new(
+        write_socket: std::sync::Arc<tokio::sync::Mutex<futures::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>,
+        event_sender: mpsc::UnboundedSender<Event>,
+        pong_receiver: mpsc::UnboundedReceiver<AppEvent>,
+    ) -> Self {
+        Self {
+            write_socket,
+            event_sender,
+            pong_receiver,
+        }
+    }
+
+    /// Runs the heartbeat loop.
+    async fn run(mut self) {
+        let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        // Wait for the first pong before starting the heartbeat cycle.
+        // This avoids sending a ping before the connection is fully established.
+        if self.pong_receiver.recv().await.is_none() {
+            return;
+        }
+
+        loop {
+            interval.tick().await;
+
+            // Send a ping frame.
+            let mut write = self.write_socket.lock().await;
+            let ping_result = write.send(Message::Ping(Bytes::default())).await;
+            if let Err(e) = ping_result {
+                error!("Failed to send heartbeat ping: {e}");
+                self.event_sender
+                    .send(Event::App(AppEvent::ConnectionError {
+                        reason: format!("Ping send failed: {e}"),
+                    }))
+                    .ok();
+                return;
+            }
+            // Drop the lock before waiting for pong so the app can send messages.
+            drop(write);
+
+            // Wait for pong with timeout.
+            match tokio::time::timeout(HEARTBEAT_TIMEOUT, self.pong_receiver.recv()).await {
+                Ok(Some(_pong)) => {
+                    // Pong received — connection is alive. Reset the interval.
+                    info!("Heartbeat: pong received");
+                }
+                Ok(None) => {
+                    // Pong channel closed — socket task exited.
+                    self.event_sender
+                        .send(Event::App(AppEvent::Disconnected))
+                        .ok();
+                    return;
+                }
+                Err(_) => {
+                    // No pong within timeout — connection is likely dead.
+                    error!("Heartbeat: pong timeout ({:?})", HEARTBEAT_TIMEOUT);
+                    self.event_sender
+                        .send(Event::App(AppEvent::ConnectionError {
+                            reason: format!("Pong timeout after {:?}", HEARTBEAT_TIMEOUT),
+                        }))
+                        .ok();
+                    return;
+                }
+            }
+        }
     }
 }

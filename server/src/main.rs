@@ -273,6 +273,7 @@ async fn process_data(
                         addr,
                         chatter_protocol::ServerMessage::Error {
                             message: "Login failed.".to_string(),
+                            code: "AUTH_FAILED".to_string(),
                         },
                     )
                     .ok();
@@ -307,7 +308,7 @@ async fn process_data(
             if let Ok(history) = run_account_task({
                 let account_db = account_db.clone();
                 let room = room.clone();
-                move || account_db.get_room_history(room, 50)
+                move || account_db.get_room_history(room, i32::MAX)
             })
             .await
             {
@@ -356,6 +357,7 @@ async fn process_data(
                         addr,
                         chatter_protocol::ServerMessage::Error {
                             message: "Join the room before sending messages.".to_string(),
+                            code: "ROOM_REQUIRED".to_string(),
                         },
                     )
                     .ok();
@@ -395,6 +397,7 @@ async fn process_data(
                         addr,
                         chatter_protocol::ServerMessage::Error {
                             message: "Join the room before requesting history.".to_string(),
+                            code: "ROOM_REQUIRED".to_string(),
                         },
                     )
                     .ok();
@@ -409,7 +412,7 @@ async fn process_data(
             if let Ok(history) = run_account_task({
                 let account_db = account_db.clone();
                 let room = room.clone();
-                move || account_db.get_room_history(room, 50)
+                move || account_db.get_room_history(room, i32::MAX)
             })
             .await
             {
@@ -508,6 +511,14 @@ pub(crate) fn broadcast_to_room(
 fn client_error(message: &str) -> chatter_protocol::ServerMessage {
     chatter_protocol::ServerMessage::Error {
         message: message.to_string(),
+        code: "GENERAL".to_string(),
+    }
+}
+
+fn client_error_with_code(message: &str, code: &str) -> chatter_protocol::ServerMessage {
+    chatter_protocol::ServerMessage::Error {
+        message: message.to_string(),
+        code: code.to_string(),
     }
 }
 
@@ -651,7 +662,7 @@ fn authenticated_login(
         .ok_or_else(session_not_found_error)?;
 
     if login == RESERVED_ANONYMOUS_LOGIN {
-        Err(client_error("Login required."))
+        Err(client_error_with_code("Login required.", "NOT_AUTHENTICATED"))
     } else {
         Ok(login)
     }
@@ -833,7 +844,7 @@ mod tests {
 
         assert_eq!(
             authenticated_login(&peer_map, addr),
-            Err(client_error("Login required.")),
+            Err(client_error_with_code("Login required.", "NOT_AUTHENTICATED")),
             "An unauthenticated (anonymous) peer must not expose a login"
         );
     }
@@ -920,7 +931,7 @@ mod tests {
         );
         assert_eq!(
             authenticated_login(&peer_map, addr),
-            Err(client_error("Login required.")),
+            Err(client_error_with_code("Login required.", "NOT_AUTHENTICATED")),
             "The peer must remain unauthenticated"
         );
 

@@ -98,7 +98,7 @@ pub enum ServerMessage {
         messages: Vec<HistoryEntry>,
     },
     /// Generic server-side error.
-    Error { message: String },
+    Error { message: String, code: String },
 }
 
 fn validate_non_empty(value: &str, field: &str) -> Result<()> {
@@ -381,8 +381,9 @@ fn validate_server_message(message: &ServerMessage) -> Result<()> {
                 validate_history_entry(entry)?;
             }
         }
-        ServerMessage::Error { message } => {
+        ServerMessage::Error { message, code } => {
             validate_required_text(message, "message", MAX_REASON_LEN)?;
+            validate_required_text(code, "code", 64)?;
         }
     }
     Ok(())
@@ -502,6 +503,7 @@ mod tests {
             },
             ServerMessage::Error {
                 message: "Something went wrong".to_string(),
+                code: "GENERAL".to_string(),
             },
         ]
     }
@@ -937,6 +939,7 @@ mod tests {
     fn server_error_round_trips() {
         let msg = ServerMessage::Error {
             message: "Something went wrong".to_string(),
+            code: "GENERAL".to_string(),
         };
 
         let json = serialize_server_message(&msg).unwrap();
@@ -1248,6 +1251,7 @@ mod tests {
     fn server_message_debug_includes_variant_name() {
         let msg = ServerMessage::Error {
             message: "test error".to_string(),
+            code: "GENERAL".to_string(),
         };
 
         assert!(format!("{msg:?}").contains("Error"));
