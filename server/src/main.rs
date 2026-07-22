@@ -530,6 +530,45 @@ fn session_not_found_error() -> chatter_protocol::ServerMessage {
     client_error("Session not found.")
 }
 
+/// Simple sliding-window rate limiter: max `limit` messages per `window_secs` seconds.
+#[derive(Debug, Clone)]
+struct RateLimiter {
+    limit: usize,
+    window_secs: u64,
+}
+
+impl RateLimiter {
+    fn new(limit: usize, window_secs: u64) -> Self {
+        Self { limit, window_secs }
+    }
+
+    /// Check and record a message for `addr`. Returns true if the message is allowed.
+    fn check(&self, addr: SocketAddr, now: std::time::Instant) -> bool {
+        use std::collections::HashMap;
+        static MAP: std::sync::LazyLock<
+            std::sync::Mutex<HashMap<SocketAddr, Vec<std::time::Instant>>>,
+        > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+        let window = std::time::Duration::from_secs(self.window_secs);
+        let cutoff = now.checked_sub(window).unwrap_or(now);
+
+        let mut map = MAP.lock().unwrap();
+
+        let timestamps = map.entry(addr).or_insert_with(Vec::new);
+        timestamps.retain(|t| *t > cutoff);
+
+        if timestamps.len() >= self.limit {
+            return false;
+        }
+
+        timestamps.push(now);
+        true
+    }
+}
+
+const RATE_LIMIT: usize = 20;
+const RATE_WINDOW_SECS: u64 = 1;
+
 fn account_backoff_duration(failures: u32) -> Duration {
     let multiplier = 1u64 << failures.saturating_sub(1).min(5);
     Duration::from_millis((ACCOUNT_BACKOFF_BASE_MS * multiplier).min(ACCOUNT_BACKOFF_MAX_MS))
@@ -683,6 +722,7 @@ async fn handle_connection(
     account_db: Account,
     raw_stream: TcpStream,
     addr: SocketAddr,
+    rate_limiter: RateLimiter,
 ) -> ServerResult {
     info!("Incoming TCP connection from: {}", addr);
 
@@ -707,9 +747,22 @@ async fn handle_connection(
     let broadcast_incoming = incoming.try_for_each(|msg| {
         let peer_map = peer_map.clone();
         let account_db = account_db.clone();
+        let rate_limiter = rate_limiter.clone();
         async move {
             match msg {
                 Message::Text(text) => {
+                    if !rate_limiter.check(addr, std::time::Instant::now()) {
+                        send_server_message(
+                            &peer_map,
+                            addr,
+                            chatter_protocol::ServerMessage::Error {
+                                message: "Rate limit exceeded. Try again shortly.".to_string(),
+                                code: "RATE_LIMITED".to_string(),
+                            },
+                        )
+                        .ok();
+                        return Ok(());
+                    }
                     let message = chatter_protocol::parse_client_message(Message::Text(text));
                     match message {
                         Ok(data) => {
@@ -787,8 +840,9 @@ async fn main() -> anyhow::Result<()> {
     while let Ok((stream, stream_addr)) = listener.accept().await {
         let state = state.clone();
         let db = account_db.clone();
+        let rate_limiter = RateLimiter::new(RATE_LIMIT, RATE_WINDOW_SECS);
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(state, db, stream, stream_addr).await {
+            if let Err(e) = handle_connection(state, db, stream, stream_addr, rate_limiter).await {
                 error!("Connection error for {}: {}", stream_addr, e);
             }
         });
@@ -1124,5 +1178,60 @@ mod tests {
         let peer = peer_map.lock().unwrap().get(&addr).unwrap().clone();
         assert_eq!(peer.login, "anonymous");
         assert!(peer.rooms.is_empty());
+    }
+
+    #[test]
+    fn test_rate_limiter_allows_under_limit() {
+        let limiter = RateLimiter::new(5, 1);
+        let addr = test_addr(9001);
+        let now = std::time::Instant::now();
+
+        // First 5 messages should be allowed
+        for i in 0..5 {
+            assert!(
+                limiter.check(addr, now + std::time::Duration::from_millis(i * 100)),
+                "Message {} should be allowed",
+                i + 1
+            );
+        }
+
+        // 6th message within same second should be rejected
+        assert!(
+            !limiter.check(addr, now + std::time::Duration::from_millis(500)),
+            "6th message should be rate limited"
+        );
+    }
+
+    #[test]
+    fn test_rate_limiter_window_expires() {
+        let limiter = RateLimiter::new(3, 1);
+        let addr = test_addr(9002);
+        let now = std::time::Instant::now();
+
+        // Fill the limit
+        for _ in 0..3 {
+            assert!(limiter.check(addr, now));
+        }
+        assert!(!limiter.check(addr, now + std::time::Duration::from_millis(500)));
+
+        // After the window passes, new messages should be allowed
+        assert!(limiter.check(addr, now + std::time::Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn test_rate_limiter_independent_per_peer() {
+        let limiter = RateLimiter::new(2, 1);
+        let addr_a = test_addr(9003);
+        let addr_b = test_addr(9004);
+        let now = std::time::Instant::now();
+
+        // Both peers can send 2 messages each
+        assert!(limiter.check(addr_a, now));
+        assert!(limiter.check(addr_a, now + std::time::Duration::from_millis(100)));
+        assert!(!limiter.check(addr_a, now + std::time::Duration::from_millis(200)));
+
+        assert!(limiter.check(addr_b, now));
+        assert!(limiter.check(addr_b, now + std::time::Duration::from_millis(100)));
+        assert!(!limiter.check(addr_b, now + std::time::Duration::from_millis(200)));
     }
 }
