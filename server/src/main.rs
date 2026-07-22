@@ -563,6 +563,23 @@ fn set_authenticated_peer(
     login: String,
 ) -> std::result::Result<Option<(String, Vec<String>)>, chatter_protocol::ServerMessage> {
     let mut peers = peer_map.lock().map_err(|_| lock_peer_error())?;
+
+    // If this login is already used by a different peer, kick the old one
+    let old_addr = peers.iter()
+        .find(|(_, peer)| peer.login == login && peer.login != RESERVED_ANONYMOUS_LOGIN)
+        .map(|(k, _)| *k);
+
+    if let Some(kick_addr) = old_addr {
+        if kick_addr != addr {
+            // Remove the old peer entry and announce departures
+            if let Some(old_peer) = peers.remove(&kick_addr) {
+                announce_room_departures(peer_map, &kick_addr, &old_peer.login, old_peer.rooms.iter().cloned().collect());
+                // Close the old connection by dropping the tx
+                drop(old_peer.tx);
+            }
+        }
+    }
+
     let peer = peers.get_mut(&addr).ok_or_else(session_not_found_error)?;
     let old_login = peer.login.clone();
     let old_rooms = peer.rooms.iter().cloned().collect::<Vec<_>>();
