@@ -34,6 +34,8 @@ pub struct App {
     password_character_index: usize,
     rooms: Vec<String>,
     room_selected: usize,
+    /// Rooms the user was in before a disconnection (saved for re-join after reconnect).
+    prev_rooms: Vec<String>,
     /// Whether we're in login or register flow.
     auth_mode: AuthMode,
 }
@@ -88,6 +90,7 @@ impl App {
             password_character_index: 0,
             rooms: default_rooms(),
             room_selected: 0,
+            prev_rooms: Vec::new(),
             auth_mode: AuthMode::Login,
         })
     }
@@ -388,13 +391,37 @@ impl App {
         self.input_mode = InputMode::Splash;
     }
 
-    /// Attempt to reconnect to the server. Returns true if reconnected.
+    /// Attempt to reconnect to the server with exponential backoff.
+    /// Saves current rooms before resetting, returns true if reconnected.
     async fn reconnect(&mut self) -> bool {
         self.messages
             .push("[System] Connection lost. Reconnecting...".to_string());
 
-        self.reconnect_after(std::time::Duration::from_secs(2))
-            .await
+        // Save rooms before reconnect so we can re-join after
+        self.prev_rooms.clone_from(&self.rooms);
+
+        let mut retry_delay = std::time::Duration::from_secs(2);
+        let max_delay = std::time::Duration::from_secs(60);
+
+        loop {
+            if !self.running {
+                return false;
+            }
+
+            match self.reconnect_after(retry_delay).await {
+                true => {
+                    // Rejoin rooms after successful reconnect
+                    self.restore_room_state().await;
+                    return true;
+                }
+                false => {
+                    if !self.running {
+                        return false;
+                    }
+                    retry_delay = (retry_delay * 2).min(max_delay);
+                }
+            }
+        }
     }
 
     async fn reconnect_after(&mut self, retry_delay: std::time::Duration) -> bool {
@@ -425,6 +452,35 @@ impl App {
                 false
             }
         }
+    }
+
+    /// Rejoin all rooms the user was in before disconnection.
+    async fn restore_room_state(&mut self) {
+        if self.prev_rooms.is_empty() {
+            return;
+        }
+
+        // Leave current room if any
+        if !self.room.is_empty() {
+            let _ = self
+                .send_client_message(chatter_protocol::ClientMessage::LeaveRoom {
+                    room: self.room.clone(),
+                })
+                .await;
+        }
+
+        // Clone rooms to avoid borrow checker issues
+        let rooms_to_rejoin: Vec<String> = self.prev_rooms.iter()
+            .filter(|r| r != &&"general")
+            .cloned()
+            .collect();
+
+        // Rejoin all previous rooms (skip "general" as it's auto-joined)
+        for room in rooms_to_rejoin {
+            self.join_room(room).await;
+        }
+
+        self.prev_rooms.clear();
     }
 
     // --- Main loop ---
