@@ -2,7 +2,7 @@ use color_eyre::eyre::OptionExt;
 use crossterm::event::Event as CrosstermEvent;
 use futures::FutureExt;
 use futures_util::{SinkExt, StreamExt};
-use log::{error, info};
+use log::{debug, error, info};
 use std::fmt::Debug;
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -250,7 +250,13 @@ impl EventSocketTask {
                 // Binary frames (files, voice), handle them here.
                 Ok(_) => (),
                 Err(e) => {
-                    error!("Error processing message: {e}");
+                    let is_reset = e.to_string().contains("Connection reset")
+                        || e.to_string().contains("without closing handshake");
+                    if is_reset {
+                        debug!("Socket reset (normal disconnect): {e}");
+                    } else {
+                        error!("Error processing message: {e}");
+                    }
                     self.send(AppEvent::ConnectionError {
                         reason: e.to_string(),
                     });

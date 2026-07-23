@@ -62,6 +62,8 @@ pub struct App {
     reconnect_tx: Option<tokio::sync::mpsc::UnboundedSender<AppEvent>>,
     /// Receiver for reconnect requests from the UI.
     reconnect_rx: tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    /// Whether a WebSocket connection is currently active.
+    connected: bool,
 }
 
 /// Whether the user is logging in or creating an account.
@@ -161,6 +163,7 @@ impl App {
             reconnect_pending: false,
             reconnect_tx: Some(reconnect_tx),
             reconnect_rx,
+            connected: false,
         })
     }
 
@@ -209,11 +212,11 @@ impl App {
 
     fn handle_splash_keys(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Enter => {
+            KeyCode::Enter if !self.reconnect_pending => {
                 self.auth_mode = AuthMode::Login;
                 self.input_mode = InputMode::EnteringLogin;
             }
-            KeyCode::Char('r' | 'R') => {
+            KeyCode::Char('r' | 'R') if !self.reconnect_pending => {
                 self.auth_mode = AuthMode::Register;
                 self.input_mode = InputMode::EnteringLogin;
             }
@@ -228,7 +231,7 @@ impl App {
     async fn handle_entering_login(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Enter
-                if !self.login_input.is_empty() => {
+                if !self.login_input.is_empty() && self.connected => {
                     self.login = self.login_input.clone();
                     self.messages.push(format!(
                         "[System] Entering password for '{}'...",
@@ -264,7 +267,7 @@ impl App {
     async fn handle_entering_password(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Enter
-                if !self.password_input.is_empty() => {
+                if !self.password_input.is_empty() && self.connected => {
                     let passwd = self.password_input.clone();
                     self.password_input.clear();
                     self.password_character_index = 0;
@@ -501,6 +504,7 @@ impl App {
                 } => {
                     if let Some(true) = result {
                         // Reconnect succeeded — create a new connected event handler.
+                        self.connected = true;
                         self.reconnect_pending = false;
                         let initial_read = {
                             let mut guard = self.initial_read.lock().unwrap();
@@ -532,6 +536,7 @@ impl App {
                     connect_notify = None; // no longer needed
                     if connected {
                         // Initial connection succeeded — create a new connected event handler.
+                        self.connected = true;
                         self.reconnect_pending = false;
                         let initial_read = {
                             let mut guard = self.initial_read.lock().unwrap();
@@ -586,6 +591,7 @@ impl App {
                         // Reconnect is handled via reconnect_rx, not events channel.
                         Event::App(AppEvent::Reconnect) => {},
                         Event::App(AppEvent::Disconnected) => {
+                            self.connected = false;
                             self.messages
                                 .push("[System] Disconnected from server.".to_string());
                             self.reset_room_on_disconnect();
@@ -598,6 +604,7 @@ impl App {
                             }));
                         }
                         Event::App(AppEvent::ConnectionError { reason }) => {
+                            self.connected = false;
                             self.messages
                                 .push(format!("[System] Connection error: {}", reason));
                             // Spawn background reconnect task.
@@ -852,7 +859,33 @@ impl App {
             frame.render_widget(List::new(items), msg_area[1]);
         } else {
             // Show messages even when not logged in (system messages)
-            let visible = (inner[0].height as usize).saturating_sub(2);
+            let msg_area = if !self.connected && self.reconnect_pending {
+                // Split into status line + messages when initial connect failed
+                let area = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(1), Constraint::Percentage(100)])
+                    .split(inner[0]);
+                let status = Paragraph::new(Line::raw(" ⚠  Connection failed. Press Enter to retry, q to quit. "))
+                    .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+                    .block(Block::bordered().title("Messages"));
+                frame.render_widget(status, area[0]);
+                area[1]
+            } else if !self.connected {
+                // Split into status line + messages when disconnected after being connected
+                let area = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(1), Constraint::Percentage(100)])
+                    .split(inner[0]);
+                let status = Paragraph::new(Line::raw(" ⚠  Disconnected from server. Reconnecting... "))
+                    .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+                    .block(Block::bordered().title("Messages"));
+                frame.render_widget(status, area[0]);
+                area[1]
+            } else {
+                inner[0]
+            };
+
+            let visible = (msg_area.height as usize).saturating_sub(1);
             let start = self.message_offset.saturating_sub(visible - 1).min(self.messages.len());
             let end = (start + visible).min(self.messages.len());
             let items: Vec<ListItem> = self.messages[start..end]
@@ -860,8 +893,8 @@ impl App {
                 .map(|m| ListItem::new(Line::raw(m.clone())))
                 .collect();
             frame.render_widget(
-                List::new(items).block(Block::bordered().title("Messages")),
-                inner[0],
+                List::new(items),
+                msg_area,
             );
         }
 
