@@ -496,7 +496,7 @@ impl App {
                     if let Some(task) = std::mem::take(&mut reconnect_task) {
                         task.await.ok()
                     } else {
-                        None
+                        std::future::pending().await
                     }
                 } => {
                     if let Some(true) = result {
