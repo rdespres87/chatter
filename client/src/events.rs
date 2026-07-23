@@ -42,6 +42,8 @@ pub enum AppEvent {
     Disconnected,
     /// The web socket failed with a transport error.
     ConnectionError { reason: String },
+    /// User requested a reconnect attempt (Enter key pressed after initial failure).
+    Reconnect,
 }
 
 /// Event handler to communicate with the app (terminal, web socket).

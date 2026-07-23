@@ -13,6 +13,7 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
 use std::sync::Arc;
+use tokio::sync::watch;
 use tokio::sync::Mutex;
 use unicode_width::UnicodeWidthStr;
 
@@ -31,7 +32,8 @@ pub struct App {
     input_mode: InputMode,
     messages: Vec<String>,
     message_offset: usize,
-    write: Arc<tokio::sync::Mutex<Option<futures::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>>,
+    /// Write handle to the WebSocket stream. Set after initial connection or reconnect.
+    ws_sink: Arc<tokio::sync::Mutex<Option<futures::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>>,
     login: String,
     room: String,
     logged_in: bool,
@@ -42,9 +44,24 @@ pub struct App {
     rooms: Vec<String>,
     room_selected: usize,
     /// Rooms the user was in before a disconnection (saved for re-join after reconnect).
+    #[allow(dead_code)]
     prev_rooms: Vec<String>,
     /// Whether we're in login or register flow.
     auth_mode: AuthMode,
+    /// Handle for the initial connection task. Dropped once connection succeeds or fails.
+    connecting_task: Option<tokio::task::JoinHandle<()>>,
+    /// Watch receiver for initial connection completion.
+    /// Set when the background task in `App::new()` finishes (success or failure).
+    connect_notify: Option<watch::Receiver<bool>>,
+    /// Read side of the WebSocket stream after initial connection.
+    /// Populated by the background task in `App::new()`.
+    initial_read: std::sync::Arc<std::sync::Mutex<Option<futures::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>>>>,
+    /// Whether the initial connection attempt failed (triggers Enter-to-retry behavior).
+    reconnect_pending: bool,
+    /// Sender to trigger a reconnect attempt from the UI (Enter key after initial failure).
+    reconnect_tx: Option<tokio::sync::mpsc::UnboundedSender<AppEvent>>,
+    /// Receiver for reconnect requests from the UI.
+    reconnect_rx: tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
 }
 
 /// Whether the user is logging in or creating an account.
@@ -65,30 +82,68 @@ enum InputMode {
 }
 
 impl App {
+    /// Creates a new App instance. The WebSocket connection is attempted
+    /// in a background task — this method returns immediately.
+    ///
+    /// If the initial connection succeeds before `run()` starts, the app
+    /// enters normal mode. If it fails, the UI renders in disconnected
+    /// state with a "Connecting… / Connection failed" message.
     pub async fn new(url: String, default_user: Option<String>) -> color_eyre::Result<Self> {
-        const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-        let connect = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(url.as_str()));
-        let (ws_stream, _) = match connect.await {
-            Ok(Ok(connection)) => connection,
-            Ok(Err(e)) => color_eyre::eyre::bail!("Failed to connect to '{url}': {e}"),
-            Err(_) => color_eyre::eyre::bail!(
-                "Timed out connecting to '{url}' after {}s",
-                CONNECT_TIMEOUT.as_secs()
-            ),
+        let events = EventHandler::disconnected();
+
+        // Shared write socket — None until the background task connects.
+        let write: Arc<tokio::sync::Mutex<Option<futures::stream::SplitSink<
+            WebSocketStream<MaybeTlsStream<TcpStream>>,
+            Message,
+       >>>> = Arc::new(Mutex::new(None));
+
+        // Shared read socket — None until the background task connects.
+        let initial_read: std::sync::Arc<std::sync::Mutex<Option<futures::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+
+        // Watch channel to signal when the initial connection task completes.
+        let (connect_tx, connect_rx) = watch::channel(false);
+
+        // Channel to send Reconnect events from handle_normal_keys.
+        let (reconnect_tx, reconnect_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let connecting_task = {
+            let write_socket = write.clone();
+            let initial_read = initial_read.clone();
+            let url = url.clone();
+            let connect_tx = connect_tx;
+            Some(tokio::spawn(async move {
+                const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+                let connect = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(url.as_str()));
+                match connect.await {
+                    Ok(Ok((ws_stream, _))) => {
+                        let (sink, stream) = ws_stream.split();
+                        *write_socket.lock().await = Some(sink);
+                        *initial_read.lock().unwrap() = Some(stream);
+                        let _ = connect_tx.send(true);
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!("Initial connection failed: {e}");
+                        let _ = connect_tx.send(false);
+                    }
+                    Err(_) => {
+                        log::warn!("Initial connection timed out after 10s");
+                        let _ = connect_tx.send(false);
+                    }
+                }
+            }))
         };
-        let (write, read) = ws_stream.split();
-        let write = Arc::new(Mutex::new(Some(write)));
 
         Ok(Self {
             url,
             running: true,
-            events: EventHandler::connected(read, write.clone()).await,
+            events,
             input: String::new(),
             character_index: 0,
             input_mode: InputMode::Splash,
             messages: Vec::new(),
             message_offset: 0,
-            write,
+            ws_sink: write,
             login: default_user.clone().unwrap_or_default(),
             room: "general".to_string(),
             logged_in: false,
@@ -100,6 +155,12 @@ impl App {
             room_selected: 0,
             prev_rooms: Vec::new(),
             auth_mode: AuthMode::Login,
+            connecting_task,
+            connect_notify: Some(connect_rx),
+            initial_read,
+            reconnect_pending: false,
+            reconnect_tx: Some(reconnect_tx),
+            reconnect_rx,
         })
     }
 
@@ -137,7 +198,7 @@ impl App {
         message: chatter_protocol::ClientMessage,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let json = chatter_protocol::serialize_client_message(&message)?;
-        let mut write = self.write.lock().await;
+        let mut write = self.ws_sink.lock().await;
         if let Some(ref mut sink) = *write {
             sink.send(Message::Text(json.into())).await?;
         }
@@ -273,6 +334,12 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.quit(),
             KeyCode::Char('c' | 'C') if key.modifiers == KeyModifiers::CONTROL => self.quit(),
+            KeyCode::Enter if self.reconnect_pending => {
+                // Connection failed — Enter triggers a reconnect attempt.
+                if let Some(tx) = &self.reconnect_tx {
+                    let _ = tx.send(AppEvent::Reconnect);
+                }
+            }
             KeyCode::Enter => {
                 self.input_mode = InputMode::Editing;
             }
@@ -389,280 +456,324 @@ impl App {
         self.room_selected = 0;
     }
 
-    fn reset_session_after_reconnect(&mut self) {
-        self.room = "general".to_string();
-        self.rooms = default_rooms();
-        self.room_selected = 0;
-        self.messages.clear();
-        self.message_offset = 0;
-        self.messages
-            .push("[System] Reconnected. Please login again.".to_string());
-        self.logged_in = false;
-        self.login = String::new();
-        self.login_input.clear();
-        self.login_character_index = 0;
-        self.password_input.clear();
-        self.password_character_index = 0;
-        self.input.clear();
-        self.character_index = 0;
-        self.input_mode = InputMode::Splash;
-    }
-
-    /// Attempt to reconnect to the server with exponential backoff.
-    /// Saves current rooms before resetting, returns true if reconnected.
-    async fn reconnect(&mut self) -> bool {
-        self.messages
-            .push("[System] Connection lost. Reconnecting...".to_string());
-
-        // Save rooms before reconnect so we can re-join after
-        self.prev_rooms.clone_from(&self.rooms);
-
-        let mut retry_delay = std::time::Duration::from_secs(2);
-        let max_delay = std::time::Duration::from_secs(60);
-
-        loop {
-            if !self.running {
-                return false;
-            }
-
-            match self.reconnect_after(retry_delay).await {
-                true => {
-                    // Rejoin rooms after successful reconnect
-                    self.restore_room_state().await;
-                    return true;
-                }
-                false => {
-                    if !self.running {
-                        return false;
-                    }
-                    retry_delay = (retry_delay * 2).min(max_delay);
-                }
-            }
-        }
-    }
-
-    async fn reconnect_after(&mut self, retry_delay: std::time::Duration) -> bool {
-        tokio::time::sleep(retry_delay).await;
-
-        const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-        let connect = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(self.url.as_str()));
-        match connect.await {
-            Ok(Ok((ws_stream, _))) => {
-                let (write, read) = ws_stream.split();
-                self.write = Arc::new(Mutex::new(Some(write)));
-                self.events = crate::events::EventHandler::connected(read, self.write.clone()).await;
-
-                self.reset_session_after_reconnect();
-                true
-            }
-            Ok(Err(e)) => {
-                self.messages.push(format!(
-                    "[System] Reconnection failed: {}. Press q or Ctrl+C to quit.",
-                    e
-                ));
-                false
-            }
-            Err(_) => {
-                self.messages.push(
-                    "[System] Reconnection timed out. Press q or Ctrl+C to quit.".to_string(),
-                );
-                false
-            }
-        }
-    }
-
-    /// Rejoin all rooms the user was in before disconnection.
-    async fn restore_room_state(&mut self) {
-        if self.prev_rooms.is_empty() {
-            return;
-        }
-
-        // Leave current room if any
-        if !self.room.is_empty() {
-            let _ = self
-                .send_client_message(chatter_protocol::ClientMessage::LeaveRoom {
-                    room: self.room.clone(),
-                })
-                .await;
-        }
-
-        // Clone rooms to avoid borrow checker issues
-        let rooms_to_rejoin: Vec<String> = self.prev_rooms.iter()
-            .filter(|r| r != &&"general")
-            .cloned()
-            .collect();
-
-        // Rejoin all previous rooms (skip "general" as it's auto-joined)
-        for room in rooms_to_rejoin {
-            self.join_room(room).await;
-        }
-
-        self.prev_rooms.clear();
-    }
-
     // --- Main loop ---
 
     pub async fn run(mut self, mut terminal: ratatui::DefaultTerminal) -> color_eyre::Result<()> {
+        // Check if the initial connection task already completed (extremely unlikely —
+        // App::new() returns immediately, but if the server is super fast we might catch it).
+        // We do NOT await the task here: blocking would delay the UI for up to 10s when
+        // the server is unreachable. Instead we check whether initial_read has been
+        // populated by the background task. If not, the UI renders in disconnected state
+        // and the reconnect logic will pick up the result when the task completes.
+        if let Some(_task) = self.connecting_task.take() {
+            // Check without blocking: try to extract the read side.
+            let initial_read = {
+                let mut guard = self.initial_read.lock().unwrap();
+                guard.take()
+            };
+            if let Some(read) = initial_read {
+                // Connection succeeded before run() started.
+                self.events = EventHandler::connected(read, self.ws_sink.clone()).await;
+            } else {
+                // Connection still in progress. Use the watch channel to detect completion.
+                // The task will send on connect_tx when it finishes (success or failure).
+                self.messages.push(
+                    "[System] Connecting to server...".to_string(),
+                );
+            }
+        }
+
+        // Reconnect task handle. Spawned when disconnected, completed when reconnected or failed.
+        let mut reconnect_task: Option<tokio::task::JoinHandle<bool>> = None;
+        let mut connect_notify = self.connect_notify.take();
+
         while self.running {
             terminal.draw(|frame| self.view(frame))?;
 
-            match self.events.next().await? {
-                Event::Crossterm(event) => if let crossterm::event::Event::Key(key) = event { match self.input_mode {
-                    InputMode::Splash => self.handle_splash_keys(key),
-                    InputMode::EnteringLogin => self.handle_entering_login(key).await,
-                    InputMode::EnteringPassword => self.handle_entering_password(key).await,
-                    InputMode::Normal => {
-                        if key.code == KeyCode::Tab {
-                            self.input_mode = InputMode::RoomList;
-                        } else {
-                            self.handle_normal_keys(key);
+            tokio::select! {
+                // Reconnect task completed.
+                result = async {
+                    if let Some(task) = std::mem::take(&mut reconnect_task) {
+                        task.await.ok()
+                    } else {
+                        None
+                    }
+                } => {
+                    if let Some(true) = result {
+                        // Reconnect succeeded — create a new connected event handler.
+                        self.reconnect_pending = false;
+                        let initial_read = {
+                            let mut guard = self.initial_read.lock().unwrap();
+                            guard.take()
+                        };
+                        if let Some(read) = initial_read {
+                            self.events = EventHandler::connected(read, self.ws_sink.clone()).await;
                         }
-                    }
-                    InputMode::RoomList => {
-                        self.handle_room_navigation(key).await;
-                    }
-                    InputMode::Editing if key.kind == KeyEventKind::Press => {
-                        self.handle_editing_keys(key).await
-                    }
-                    InputMode::Editing => {}
-                } },
-                Event::App(AppEvent::Quit) => self.quit(),
-                Event::App(AppEvent::Disconnected) => {
-                    self.messages
-                        .push("[System] Disconnected from server.".to_string());
-                    self.reset_room_on_disconnect();
-                    if !self.reconnect().await {
+                    } else {
+                        // Reconnect failed — push message and break.
+                        self.messages.push("[System] Reconnection failed. Press q or Ctrl+C to quit.".to_string());
                         break;
                     }
+                    reconnect_task = None;
                 }
-                Event::App(AppEvent::ConnectionError { reason }) => {
-                    self.messages
-                        .push(format!("[System] Connection error: {}", reason));
-                    if !self.reconnect().await {
-                        break;
+
+                // Initial connection task completed (via watch channel).
+                _ = async {
+                    if let Some(ref mut rx) = connect_notify {
+                        rx.changed().await
+                    } else {
+                        futures::future::pending().await
+                    }
+                } => {
+                    // Read the connection status before clearing the receiver.
+                    let connected = connect_notify.as_ref()
+                        .map(|rx| *rx.borrow())
+                        .unwrap_or(false);
+                    connect_notify = None; // no longer needed
+                    if connected {
+                        // Initial connection succeeded — create a new connected event handler.
+                        self.reconnect_pending = false;
+                        let initial_read = {
+                            let mut guard = self.initial_read.lock().unwrap();
+                            guard.take()
+                        };
+                        if let Some(read) = initial_read {
+                            self.events = EventHandler::connected(read, self.ws_sink.clone()).await;
+                        }
+                    } else {
+                        // Initial connection failed — push message and wait for Enter to retry.
+                        self.messages.push("[System] Connection failed. Press Enter to retry, q to quit.".to_string());
+                        self.reconnect_pending = true;
                     }
                 }
-                Event::App(AppEvent::ReceivedMsg { data }) => {
-                    if let Ok(msg) = chatter_protocol::parse_server_message(data) {
-                        match msg {
-                            chatter_protocol::ServerMessage::LoginOk { login } => {
-                                self.logged_in = true;
-                                self.login = login.clone();
-                                self.input_mode = InputMode::Normal;
-                                self.messages.push(format!("[System] Welcome, {}!", login));
-                                self.join_room("general".to_string()).await;
-                            }
-                            chatter_protocol::ServerMessage::LoginFailed { reason } => {
-                                self.logged_in = false;
-                                self.password_input.clear();
-                                self.password_character_index = 0;
-                                self.messages.push(format!("[System] {}", reason));
-                                self.input_mode = InputMode::EnteringPassword;
-                            }
-                            chatter_protocol::ServerMessage::AccountCreated { login } => {
-                                self.auth_mode = AuthMode::Login;
-                                self.messages.push(format!(
-                                    "[System] Account '{}' created. Please login.",
-                                    login
-                                ));
-                                self.login_input.clear();
-                                self.login_character_index = 0;
-                                self.password_input.clear();
-                                self.password_character_index = 0;
-                                self.input_mode = InputMode::EnteringLogin;
-                            }
-                            chatter_protocol::ServerMessage::AccountCreationFailed { reason } => {
-                                self.password_input.clear();
-                                self.password_character_index = 0;
-                                self.messages.push(format!("[System] {}", reason));
-                                self.input_mode = InputMode::EnteringPassword;
-                            }
-                            chatter_protocol::ServerMessage::IncomingMessage {
-                                login,
-                                room,
-                                message,
-                            } => {
-                                if login == "Server" && room == "system" {
-                                    self.messages.push(format!("[System] {}", message));
-                                } else if room == self.room {
-                                    self.messages.push(format!("[{}] {}", login, message));
-                                }
-                                // Trim to MAX_HISTORY (keep most recent)
-                                if self.messages.len() > MAX_HISTORY {
-                                    self.messages.drain(..self.messages.len() - MAX_HISTORY);
-                                }
-                            }
-                            chatter_protocol::ServerMessage::RoomList { rooms } => {
-                                self.rooms = rooms;
-                                // Clamp room_selected to valid range
-                                if !self.rooms.is_empty() {
-                                    self.room_selected =
-                                        self.rooms.iter().position(|r| *r == self.room)
-                                            .unwrap_or(self.rooms.len() - 1);
+
+                // Reconnect request from UI (Enter key pressed after initial failure).
+                event = self.reconnect_rx.recv() => {
+                    if let Some(AppEvent::Reconnect) = event {
+                        // Spawn a reconnect attempt task using the existing reconnect_attempt logic.
+                        let url = self.url.clone();
+                        let ws_sink = self.ws_sink.clone();
+                        let initial_read = self.initial_read.clone();
+                        reconnect_task = Some(tokio::spawn(async move {
+                            Self::reconnect_attempt(url, ws_sink, initial_read).await
+                        }));
+                    }
+                }
+
+                // Normal event processing.
+                event = self.events.next() => {
+                    match event? {
+                        Event::Crossterm(event) => if let crossterm::event::Event::Key(key) = event { match self.input_mode {
+                            InputMode::Splash => self.handle_splash_keys(key),
+                            InputMode::EnteringLogin => self.handle_entering_login(key).await,
+                            InputMode::EnteringPassword => self.handle_entering_password(key).await,
+                            InputMode::Normal => {
+                                if key.code == KeyCode::Tab {
+                                    self.input_mode = InputMode::RoomList;
                                 } else {
-                                    self.room_selected = 0;
+                                    self.handle_normal_keys(key);
                                 }
                             }
-                            chatter_protocol::ServerMessage::RoomHistory {
-                                room: hist_room,
-                                messages: history,
-                            } => {
-                                if hist_room == self.room {
-                                    self.messages = history
-                                        .into_iter()
-                                        .map(|entry| {
-                                            format!(
-                                                "[{}] {}: {}",
-                                                entry.timestamp, entry.login, entry.message
-                                            )
-                                        })
-                                        .collect();
-                                    // Trim to MAX_HISTORY (keep most recent)
-                                    if self.messages.len() > MAX_HISTORY {
-                                        self.messages.drain(..self.messages.len() - MAX_HISTORY);
-                                    }
-                                    if !self.messages.is_empty() {
-                                        self.message_offset = self.messages.len().saturating_sub(1);
-                                    }
-                                }
+                            InputMode::RoomList => {
+                                self.handle_room_navigation(key).await;
                             }
-                            chatter_protocol::ServerMessage::Error { message, code } => {
-                                if is_not_authenticated_error(&code) {
-                                    self.messages.push(
-                                        "[System] Session expired. Please login again.".into(),
-                                    );
-                                    // Reset all auth state even if the client believed
-                                    // it was logged in — the server disagrees.
-                                    self.logged_in = false;
-                                    self.login = String::new();
-                                    self.login_input.clear();
-                                    self.login_character_index = 0;
-                                    self.input_mode = InputMode::Splash;
-                                } else {
-                                    self.messages.push(format!("[System] Error: {}", message));
-                                }
-                                self.password_input.clear();
-                                self.password_character_index = 0;
-                                if !self.logged_in {
-                                    self.login_input.clear();
-                                    self.login_character_index = 0;
-                                    self.input_mode = InputMode::Splash;
-                                }
+                            InputMode::Editing if key.kind == KeyEventKind::Press => {
+                                self.handle_editing_keys(key).await
                             }
+                            InputMode::Editing => {}
+                        } },
+                        Event::App(AppEvent::Quit) => self.quit(),
+                        // Reconnect is handled via reconnect_rx, not events channel.
+                        Event::App(AppEvent::Reconnect) => {},
+                        Event::App(AppEvent::Disconnected) => {
+                            self.messages
+                                .push("[System] Disconnected from server.".to_string());
+                            self.reset_room_on_disconnect();
+                            // Spawn background reconnect task.
+                            let url = self.url.clone();
+                            let ws_sink = self.ws_sink.clone();
+                            let initial_read = self.initial_read.clone();
+                            reconnect_task = Some(tokio::spawn(async move {
+                                Self::reconnect_attempt(url, ws_sink, initial_read).await
+                            }));
                         }
-                        if !self.messages.is_empty()
-                            && self.input_mode != InputMode::Splash
-                            && self.input_mode != InputMode::EnteringLogin
-                            && self.input_mode != InputMode::EnteringPassword
-                            && self.input_mode != InputMode::RoomList
-                        {
-                            self.message_offset = self.messages.len().saturating_sub(1);
+                        Event::App(AppEvent::ConnectionError { reason }) => {
+                            self.messages
+                                .push(format!("[System] Connection error: {}", reason));
+                            // Spawn background reconnect task.
+                            let url = self.url.clone();
+                            let ws_sink = self.ws_sink.clone();
+                            let initial_read = self.initial_read.clone();
+                            reconnect_task = Some(tokio::spawn(async move {
+                                Self::reconnect_attempt(url, ws_sink, initial_read).await
+                            }));
+                        }
+                        Event::App(AppEvent::ReceivedMsg { data }) => {
+                            if let Ok(msg) = chatter_protocol::parse_server_message(data) {
+                                match msg {
+                                    chatter_protocol::ServerMessage::LoginOk { login } => {
+                                        self.logged_in = true;
+                                        self.login = login.clone();
+                                        self.input_mode = InputMode::Normal;
+                                        self.messages.push(format!("[System] Welcome, {}!", login));
+                                        self.join_room("general".to_string()).await;
+                                    }
+                                    chatter_protocol::ServerMessage::LoginFailed { reason } => {
+                                        self.logged_in = false;
+                                        self.password_input.clear();
+                                        self.password_character_index = 0;
+                                        self.messages.push(format!("[System] {}", reason));
+                                        self.input_mode = InputMode::EnteringPassword;
+                                    }
+                                    chatter_protocol::ServerMessage::AccountCreated { login } => {
+                                        self.auth_mode = AuthMode::Login;
+                                        self.messages.push(format!(
+                                            "[System] Account '{}' created. Please login.",
+                                            login
+                                        ));
+                                        self.login_input.clear();
+                                        self.login_character_index = 0;
+                                        self.password_input.clear();
+                                        self.password_character_index = 0;
+                                        self.input_mode = InputMode::EnteringLogin;
+                                    }
+                                    chatter_protocol::ServerMessage::AccountCreationFailed { reason } => {
+                                        self.password_input.clear();
+                                        self.password_character_index = 0;
+                                        self.messages.push(format!("[System] {}", reason));
+                                        self.input_mode = InputMode::EnteringPassword;
+                                    }
+                                    chatter_protocol::ServerMessage::IncomingMessage {
+                                        login,
+                                        room,
+                                        message,
+                                    } => {
+                                        if login == "Server" && room == "system" {
+                                            self.messages.push(format!("[System] {}", message));
+                                        } else if room == self.room {
+                                            self.messages.push(format!("[{}] {}", login, message));
+                                        }
+                                        // Trim to MAX_HISTORY (keep most recent)
+                                        if self.messages.len() > MAX_HISTORY {
+                                            self.messages.drain(..self.messages.len() - MAX_HISTORY);
+                                        }
+                                    }
+                                    chatter_protocol::ServerMessage::RoomList { rooms } => {
+                                        self.rooms = rooms;
+                                        // Clamp room_selected to valid range
+                                        if !self.rooms.is_empty() {
+                                            self.room_selected =
+                                                self.rooms.iter().position(|r| *r == self.room)
+                                                    .unwrap_or(self.rooms.len() - 1);
+                                        } else {
+                                            self.room_selected = 0;
+                                        }
+                                    }
+                                    chatter_protocol::ServerMessage::RoomHistory {
+                                        room: hist_room,
+                                        messages: history,
+                                    } => {
+                                        if hist_room == self.room {
+                                            self.messages = history
+                                                .into_iter()
+                                                .map(|entry| {
+                                                    format!(
+                                                        "[{}] {}: {}",
+                                                        entry.timestamp, entry.login, entry.message
+                                                    )
+                                                })
+                                                .collect();
+                                            // Trim to MAX_HISTORY (keep most recent)
+                                            if self.messages.len() > MAX_HISTORY {
+                                                self.messages.drain(..self.messages.len() - MAX_HISTORY);
+                                            }
+                                            if !self.messages.is_empty() {
+                                                self.message_offset = self.messages.len().saturating_sub(1);
+                                            }
+                                        }
+                                    }
+                                    chatter_protocol::ServerMessage::Error { message, code } => {
+                                        if is_not_authenticated_error(&code) {
+                                            self.messages.push(
+                                                "[System] Session expired. Please login again.".into(),
+                                            );
+                                            // Reset all auth state even if the client believed
+                                            // it was logged in — the server disagrees.
+                                            self.logged_in = false;
+                                            self.login = String::new();
+                                            self.login_input.clear();
+                                            self.login_character_index = 0;
+                                            self.input_mode = InputMode::Splash;
+                                        } else {
+                                            self.messages.push(format!("[System] Error: {}", message));
+                                        }
+                                        self.password_input.clear();
+                                        self.password_character_index = 0;
+                                        if !self.logged_in {
+                                            self.login_input.clear();
+                                            self.login_character_index = 0;
+                                            self.input_mode = InputMode::Splash;
+                                        }
+                                    }
+                                }
+                                if !self.messages.is_empty()
+                                    && self.input_mode != InputMode::Splash
+                                    && self.input_mode != InputMode::EnteringLogin
+                                    && self.input_mode != InputMode::EnteringPassword
+                                    && self.input_mode != InputMode::RoomList
+                                {
+                                    self.message_offset = self.messages.len().saturating_sub(1);
+                                }
+                            }
                         }
                     }
                 }
             }
         }
         Ok(())
+    }
+
+    /// Background reconnect attempt with exponential backoff (2s → 60s).
+    /// Returns true when connected, false on shutdown.
+    async fn reconnect_attempt(
+        url: String,
+        ws_sink: Arc<tokio::sync::Mutex<Option<futures::stream::SplitSink<
+            WebSocketStream<MaybeTlsStream<TcpStream>>,
+            Message,
+        >>>>,
+        initial_read: Arc<std::sync::Mutex<Option<futures::stream::SplitStream<
+            WebSocketStream<MaybeTlsStream<TcpStream>>,
+        >>>>,
+    ) -> bool {
+        let mut retry_delay = std::time::Duration::from_secs(2);
+        let max_delay = std::time::Duration::from_secs(60);
+
+        loop {
+            tokio::time::sleep(retry_delay).await;
+            retry_delay = (retry_delay * 2).min(max_delay);
+
+            const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+            match tokio::time::timeout(CONNECT_TIMEOUT, connect_async(url.as_str())).await {
+                Ok(Ok((ws_stream, _))) => {
+                    let (write, read) = ws_stream.split();
+                    {
+                        let mut sink_guard = ws_sink.lock().await;
+                        *sink_guard = Some(write);
+                    }
+                    {
+                        let mut read_guard = initial_read.lock().unwrap();
+                        *read_guard = Some(read);
+                    }
+                    return true;
+                }
+                Ok(Err(_e)) => {
+                    // Connection failed, will retry with backoff
+                }
+                Err(_) => {
+                    // Timeout, will retry with backoff
+                }
+            }
+        }
     }
 
     // --- UI rendering ---
