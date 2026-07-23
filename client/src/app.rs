@@ -587,9 +587,18 @@ impl App {
                             self.events = EventHandler::connected(read, self.ws_sink.clone()).await;
                         }
                     } else {
-                        // Initial connection failed — push message and wait for Enter to retry.
-                        self.messages.push("[System] Connection failed. Press Enter to retry, q to quit.".to_string());
+                        // Initial connection failed — push message and auto-retry with backoff.
+                        self.messages.push("[System] Connection failed. Reconnecting...".to_string());
                         self.reconnect_pending = true;
+                        // Spawn background reconnect task with exponential backoff.
+                        if reconnect_task.is_none() {
+                            let url = self.url.clone();
+                            let ws_sink = self.ws_sink.clone();
+                            let initial_read = self.initial_read.clone();
+                            reconnect_task = Some(tokio::spawn(async move {
+                                App::reconnect_attempt(url, ws_sink, initial_read, None, None, true).await
+                            }));
+                        }
                     }
                 }
 
@@ -949,12 +958,12 @@ impl App {
         } else {
             // Show messages even when not logged in (system messages)
             let msg_area = if !self.connected && self.reconnect_pending {
-                // Split into status line + messages when initial connect failed
+                // Split into status line + messages when initial connect failed (auto-retrying)
                 let area = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Length(1), Constraint::Percentage(100)])
                     .split(inner[0]);
-                let status = Paragraph::new(Line::raw(" ⚠  Connection failed. Press Enter to retry, q to quit. "))
+                let status = Paragraph::new(Line::raw(" ⚠  Reconnecting... "))
                     .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
                     .block(Block::bordered().title("Messages"));
                 frame.render_widget(status, area[0]);
