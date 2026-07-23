@@ -513,11 +513,12 @@ impl App {
                     }
                 } => {
                     if let Some((connected, re_login_performed)) = result {
-                        if connected {
-                            // Reconnect succeeded — create a new connected event handler.
-                            self.connected = true;
-                            self.reconnect_pending = false;
-                            if re_login_performed {
+                    if connected {
+                        // Reconnect succeeded — create a new connected event handler.
+                        self.connected = true;
+                        self.reconnect_pending = false;
+                        self.messages.push("[System] Reconnected.".to_string());
+                        if re_login_performed {
                                 // Auto-relogin succeeded — go straight to room view.
                                 self.logged_in = true;
                                 let initial_read = {
@@ -579,6 +580,7 @@ impl App {
                         // Initial connection succeeded — create a new connected event handler.
                         self.connected = true;
                         self.reconnect_pending = false;
+                        self.messages.push("[System] Connection established.".to_string());
                         let initial_read = {
                             let mut guard = self.initial_read.lock().unwrap();
                             guard.take()
