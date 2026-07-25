@@ -885,20 +885,14 @@ async fn main() -> anyhow::Result<()> {
                 // Close the listener to unblock accept() and stop accepting new connections.
                 drop(listener);
                 info!("Listener closed. Shutting down (clients will reconnect).");
+                // Drop the JoinSet to abandon active connection tasks.
+                // Clients have reconnection so they will come back.
+                drop(tasks);
+                info!("Shutting down.");
                 break;
             }
         }
     }
-
-    // Let already-connected clients finish gracefully, but don't block forever.
-    let shutdown_timeout = tokio::time::sleep(Duration::from_secs(5));
-    tokio::pin!(shutdown_timeout);
-    while !shutdown_timeout.is_elapsed() {
-        if tasks.join_next().await.is_none() {
-            break;
-        }
-    }
-    info!("Shutting down.");
 
     Ok(())
 }
