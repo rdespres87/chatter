@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use color_eyre::eyre::OptionExt;
 use crossterm::event::Event as CrosstermEvent;
 use futures::FutureExt;
@@ -10,7 +11,6 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::protocol::Message;
-use bytes::Bytes;
 
 /// How often to send a ping frame.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
@@ -62,7 +62,13 @@ impl EventHandler {
     /// Panics if called outside of a tokio runtime context, as it calls [`tokio::spawn`].
     pub(crate) async fn connected(
         read_socket: futures::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
-        write_socket: std::sync::Arc<tokio::sync::Mutex<Option<futures::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>>,
+        write_socket: std::sync::Arc<
+            tokio::sync::Mutex<
+                Option<
+                    futures::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
+                >,
+            >,
+        >,
     ) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         // Channel for forwarding pong frames from socket task to heartbeat task.
@@ -88,7 +94,7 @@ impl EventHandler {
         {
             let sigterm_sender = sender.clone();
             tokio::spawn(async move {
-                use tokio::signal::unix::{signal, SignalKind};
+                use tokio::signal::unix::{SignalKind, signal};
                 if let Ok(mut stream) = signal(SignalKind::terminate()) {
                     stream.recv().await;
                     let _ = sigterm_sender.send(Event::App(AppEvent::Quit));
@@ -118,7 +124,7 @@ impl EventHandler {
         {
             let sigterm_sender = sender.clone();
             tokio::spawn(async move {
-                use tokio::signal::unix::{signal, SignalKind};
+                use tokio::signal::unix::{SignalKind, signal};
                 if let Ok(mut stream) = signal(SignalKind::terminate()) {
                     stream.recv().await;
                     let _ = sigterm_sender.send(Event::App(AppEvent::Quit));
@@ -285,7 +291,11 @@ impl EventSocketTask {
 /// send messages while the heartbeat runs.
 struct HeartbeatTask {
     /// Output web socket (used to send ping frames). Shared with the app via Arc<Mutex<Option>>.
-    write_socket: std::sync::Arc<tokio::sync::Mutex<Option<futures::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>>,
+    write_socket: std::sync::Arc<
+        tokio::sync::Mutex<
+            Option<futures::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>,
+        >,
+    >,
     /// Event sender for signaling disconnection.
     event_sender: mpsc::UnboundedSender<Event>,
     /// Channel to receive pong notifications from the socket task.
@@ -295,7 +305,13 @@ struct HeartbeatTask {
 impl HeartbeatTask {
     /// Constructs a new heartbeat task.
     fn new(
-        write_socket: std::sync::Arc<tokio::sync::Mutex<Option<futures::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>>,
+        write_socket: std::sync::Arc<
+            tokio::sync::Mutex<
+                Option<
+                    futures::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
+                >,
+            >,
+        >,
         event_sender: mpsc::UnboundedSender<Event>,
         pong_receiver: mpsc::UnboundedReceiver<AppEvent>,
     ) -> Self {
@@ -326,9 +342,11 @@ impl HeartbeatTask {
                 if let Some(ref mut ws) = *write {
                     if let Err(e) = ws.send(Message::Ping(Bytes::default())).await {
                         error!("Failed to send heartbeat ping: {e}");
-                        self.event_sender.send(Event::App(AppEvent::ConnectionError {
-                            reason: format!("Ping send failed: {e}"),
-                        })).ok();
+                        self.event_sender
+                            .send(Event::App(AppEvent::ConnectionError {
+                                reason: format!("Ping send failed: {e}"),
+                            }))
+                            .ok();
                         return;
                     }
                 }

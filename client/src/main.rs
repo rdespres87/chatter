@@ -89,7 +89,6 @@ async fn main() -> color_eyre::Result<()> {
     let _guard = TerminalGuard;
 
     // Run the app — terminal is consumed, its Drop calls restore().
-    
 
     app.run(terminal).await
 }

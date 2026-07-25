@@ -13,8 +13,8 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
 use std::sync::Arc;
-use tokio::sync::watch;
 use tokio::sync::Mutex;
+use tokio::sync::watch;
 use unicode_width::UnicodeWidthStr;
 
 use crate::events::{AppEvent, Event, EventHandler};
@@ -33,7 +33,11 @@ pub struct App {
     messages: Vec<String>,
     message_offset: usize,
     /// Write handle to the WebSocket stream. Set after initial connection or reconnect.
-    ws_sink: Arc<tokio::sync::Mutex<Option<futures::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>>,
+    ws_sink: Arc<
+        tokio::sync::Mutex<
+            Option<futures::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>,
+        >,
+    >,
     login: String,
     room: String,
     logged_in: bool,
@@ -55,7 +59,11 @@ pub struct App {
     connect_notify: Option<watch::Receiver<bool>>,
     /// Read side of the WebSocket stream after initial connection.
     /// Populated by the background task in `App::new()`.
-    initial_read: std::sync::Arc<std::sync::Mutex<Option<futures::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>>>>,
+    initial_read: std::sync::Arc<
+        std::sync::Mutex<
+            Option<futures::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>>,
+        >,
+    >,
     /// Whether the initial connection attempt failed (triggers Enter-to-retry behavior).
     reconnect_pending: bool,
     /// Sender to trigger a reconnect attempt from the UI (Enter key after initial failure).
@@ -97,14 +105,20 @@ impl App {
         let events = EventHandler::disconnected();
 
         // Shared write socket — None until the background task connects.
-        let write: Arc<tokio::sync::Mutex<Option<futures::stream::SplitSink<
-            WebSocketStream<MaybeTlsStream<TcpStream>>,
-            Message,
-       >>>> = Arc::new(Mutex::new(None));
+        let write: Arc<
+            tokio::sync::Mutex<
+                Option<
+                    futures::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
+                >,
+            >,
+        > = Arc::new(Mutex::new(None));
 
         // Shared read socket — None until the background task connects.
-        let initial_read: std::sync::Arc<std::sync::Mutex<Option<futures::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let initial_read: std::sync::Arc<
+            std::sync::Mutex<
+                Option<futures::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>>,
+            >,
+        > = std::sync::Arc::new(std::sync::Mutex::new(None));
 
         // Watch channel to signal when the initial connection task completes.
         let (connect_tx, connect_rx) = watch::channel(false);
@@ -240,15 +254,14 @@ impl App {
 
     async fn handle_entering_login(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Enter
-                if !self.login_input.is_empty() && self.connected => {
-                    self.login = self.login_input.clone();
-                    self.messages.push(format!(
-                        "[System] Entering password for '{}'...",
-                        self.login
-                    ));
-                    self.input_mode = InputMode::EnteringPassword;
-                }
+            KeyCode::Enter if !self.login_input.is_empty() && self.connected => {
+                self.login = self.login_input.clone();
+                self.messages.push(format!(
+                    "[System] Entering password for '{}'...",
+                    self.login
+                ));
+                self.input_mode = InputMode::EnteringPassword;
+            }
             KeyCode::Char(c) if key.kind == KeyEventKind::Press => {
                 Self::do_enter_char(c, &mut self.login_character_index, &mut self.login_input);
             }
@@ -276,48 +289,45 @@ impl App {
 
     async fn handle_entering_password(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Enter
-                if !self.password_input.is_empty() && self.connected => {
-                    let passwd = self.password_input.clone();
-                    self.password_input.clear();
-                    self.password_character_index = 0;
+            KeyCode::Enter if !self.password_input.is_empty() && self.connected => {
+                let passwd = self.password_input.clone();
+                self.password_input.clear();
+                self.password_character_index = 0;
 
-                    match self.auth_mode {
-                        AuthMode::Login => {
-                            self.messages
-                                .push(format!("[System] Logging in as '{}'...", self.login));
-                            if let Err(e) = self
-                                .send_client_message(chatter_protocol::ClientMessage::Login {
-                                    login: self.login.clone(),
-                                    passwd,
-                                })
-                                .await
-                            {
-                                log::error!("Login send error: {}", e);
-                                self.messages.push("[System] Login failed.".to_string());
-                                self.input_mode = InputMode::Splash;
-                            }
+                match self.auth_mode {
+                    AuthMode::Login => {
+                        self.messages
+                            .push(format!("[System] Logging in as '{}'...", self.login));
+                        if let Err(e) = self
+                            .send_client_message(chatter_protocol::ClientMessage::Login {
+                                login: self.login.clone(),
+                                passwd,
+                            })
+                            .await
+                        {
+                            log::error!("Login send error: {}", e);
+                            self.messages.push("[System] Login failed.".to_string());
+                            self.input_mode = InputMode::Splash;
                         }
-                        AuthMode::Register => {
+                    }
+                    AuthMode::Register => {
+                        self.messages
+                            .push(format!("[System] Creating account '{}'...", self.login));
+                        if let Err(e) = self
+                            .send_client_message(chatter_protocol::ClientMessage::CreateAccount {
+                                login: self.login.clone(),
+                                passwd,
+                            })
+                            .await
+                        {
+                            log::error!("Register send error: {}", e);
                             self.messages
-                                .push(format!("[System] Creating account '{}'...", self.login));
-                            if let Err(e) = self
-                                .send_client_message(
-                                    chatter_protocol::ClientMessage::CreateAccount {
-                                        login: self.login.clone(),
-                                        passwd,
-                                    },
-                                )
-                                .await
-                            {
-                                log::error!("Register send error: {}", e);
-                                self.messages
-                                    .push("[System] Registration failed.".to_string());
-                                self.input_mode = InputMode::Splash;
-                            }
+                                .push("[System] Registration failed.".to_string());
+                            self.input_mode = InputMode::Splash;
                         }
                     }
                 }
+            }
             KeyCode::Char(c) if key.kind == KeyEventKind::Press => {
                 Self::do_enter_char(
                     c,
@@ -356,36 +366,33 @@ impl App {
             KeyCode::Enter => {
                 self.input_mode = InputMode::Editing;
             }
-            KeyCode::Up
-                if self.message_offset > 0 => {
-                    self.message_offset -= 1;
-                }
-            KeyCode::Down
-                if self.message_offset < self.messages.len().saturating_sub(1) => {
-                    self.message_offset += 1;
-                }
+            KeyCode::Up if self.message_offset > 0 => {
+                self.message_offset -= 1;
+            }
+            KeyCode::Down if self.message_offset < self.messages.len().saturating_sub(1) => {
+                self.message_offset += 1;
+            }
             _ => {}
         }
     }
 
     async fn handle_editing_keys(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Enter
-                if !self.input.is_empty() => {
-                    let msg = self.input.clone();
-                    self.messages.push(format!("[me] {}", msg));
-                    if let Err(e) = self
-                        .send_client_message(chatter_protocol::ClientMessage::SendMessage {
-                            room: self.room.clone(),
-                            message: msg,
-                        })
-                        .await
-                    {
-                        log::error!("Send error: {}", e);
-                    }
-                    self.input.clear();
-                    self.character_index = 0;
+            KeyCode::Enter if !self.input.is_empty() => {
+                let msg = self.input.clone();
+                self.messages.push(format!("[me] {}", msg));
+                if let Err(e) = self
+                    .send_client_message(chatter_protocol::ClientMessage::SendMessage {
+                        room: self.room.clone(),
+                        message: msg,
+                    })
+                    .await
+                {
+                    log::error!("Send error: {}", e);
                 }
+                self.input.clear();
+                self.character_index = 0;
+            }
             KeyCode::Char(c) => {
                 Self::do_enter_char(c, &mut self.character_index, &mut self.input);
             }
@@ -407,14 +414,12 @@ impl App {
 
     async fn handle_room_navigation(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Up
-                if self.room_selected > 0 => {
-                    self.room_selected -= 1;
-                }
-            KeyCode::Down
-                if self.room_selected < self.rooms.len().saturating_sub(1) => {
-                    self.room_selected += 1;
-                }
+            KeyCode::Up if self.room_selected > 0 => {
+                self.room_selected -= 1;
+            }
+            KeyCode::Down if self.room_selected < self.rooms.len().saturating_sub(1) => {
+                self.room_selected += 1;
+            }
             KeyCode::Enter => {
                 if let Some(room) = self.rooms.get(self.room_selected).cloned() {
                     self.join_room(room).await;
@@ -438,9 +443,9 @@ impl App {
                         room: self.room.clone(),
                     })
                     .await
-                {
-                    log::error!("Leave room error: {}", e);
-                }
+            {
+                log::error!("Leave room error: {}", e);
+            }
             self.messages.clear();
             self.message_offset = 0;
         }
@@ -490,9 +495,8 @@ impl App {
             } else {
                 // Connection still in progress. Use the watch channel to detect completion.
                 // The task will send on connect_tx when it finishes (success or failure).
-                self.messages.push(
-                    "[System] Connecting to server...".to_string(),
-                );
+                self.messages
+                    .push("[System] Connecting to server...".to_string());
             }
         }
 
@@ -811,17 +815,23 @@ impl App {
     /// Returns true when connected.
     async fn reconnect_attempt(
         url: String,
-        ws_sink: Arc<tokio::sync::Mutex<Option<futures::stream::SplitSink<
-            WebSocketStream<MaybeTlsStream<TcpStream>>,
-            Message,
-        >>>>,
-        initial_read: Arc<std::sync::Mutex<Option<futures::stream::SplitStream<
-            WebSocketStream<MaybeTlsStream<TcpStream>>,
-        >>>>,
+        ws_sink: Arc<
+            tokio::sync::Mutex<
+                Option<
+                    futures::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
+                >,
+            >,
+        >,
+        initial_read: Arc<
+            std::sync::Mutex<
+                Option<futures::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>>,
+            >,
+        >,
         login: Option<String>,
         password: Option<String>,
         skip_initial_delay: bool,
-    ) -> (bool, bool) { // (connected, re-login_performed)
+    ) -> (bool, bool) {
+        // (connected, re-login_performed)
         let mut retry_delay = std::time::Duration::from_secs(2);
         let max_delay = std::time::Duration::from_secs(60);
 
@@ -852,10 +862,11 @@ impl App {
                                 login: l.clone(),
                                 passwd: p.clone(),
                             };
-                            let encoded = match chatter_protocol::serialize_client_message(&login_msg) {
-                                Ok(e) => e,
-                                Err(_) => return (true, false),
-                            };
+                            let encoded =
+                                match chatter_protocol::serialize_client_message(&login_msg) {
+                                    Ok(e) => e,
+                                    Err(_) => return (true, false),
+                                };
                             let msg = Message::Text(encoded.into());
                             // Lock the sink, send, then unlock
                             {
@@ -950,7 +961,10 @@ impl App {
 
             // Messages with scroll
             let visible = (msg_area[1].height as usize).saturating_sub(2);
-            let start = self.message_offset.saturating_sub(visible - 1).min(self.messages.len());
+            let start = self
+                .message_offset
+                .saturating_sub(visible - 1)
+                .min(self.messages.len());
             let end = (start + visible).min(self.messages.len());
             let items: Vec<ListItem> = self.messages[start..end]
                 .iter()
@@ -976,9 +990,10 @@ impl App {
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Length(1), Constraint::Percentage(100)])
                     .split(inner[0]);
-                let status = Paragraph::new(Line::raw(" ⚠  Disconnected from server. Reconnecting... "))
-                    .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
-                    .block(Block::bordered().title("Messages"));
+                let status =
+                    Paragraph::new(Line::raw(" ⚠  Disconnected from server. Reconnecting... "))
+                        .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+                        .block(Block::bordered().title("Messages"));
                 frame.render_widget(status, area[0]);
                 area[1]
             } else {
@@ -986,16 +1001,16 @@ impl App {
             };
 
             let visible = (msg_area.height as usize).saturating_sub(1);
-            let start = self.message_offset.saturating_sub(visible - 1).min(self.messages.len());
+            let start = self
+                .message_offset
+                .saturating_sub(visible - 1)
+                .min(self.messages.len());
             let end = (start + visible).min(self.messages.len());
             let items: Vec<ListItem> = self.messages[start..end]
                 .iter()
                 .map(|m| ListItem::new(Line::raw(m.clone())))
                 .collect();
-            frame.render_widget(
-                List::new(items),
-                msg_area,
-            );
+            frame.render_widget(List::new(items), msg_area);
         }
 
         // Password masking
@@ -1076,9 +1091,7 @@ fn default_rooms() -> Vec<String> {
 
 /// Calculate the visual column position for a cursor at `char_index` in `text`.
 fn cursor_visual_x(text: &str, char_index: usize) -> u16 {
-    text[..char_index.min(text.len())]
-        .width() as u16
-        + 1 // +1 for the text area padding inside the block
+    text[..char_index.min(text.len())].width() as u16 + 1 // +1 for the text area padding inside the block
 }
 
 fn is_not_authenticated_error(code: &str) -> bool {
@@ -1091,13 +1104,9 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
 
-    type SinkType = futures_util::stream::SplitSink<
-        WebSocketStream<MaybeTlsStream<TcpStream>>,
-        Message,
-    >;
-    type ReadType = futures_util::stream::SplitStream<
-        WebSocketStream<MaybeTlsStream<TcpStream>>,
-    >;
+    type SinkType =
+        futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
+    type ReadType = futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
     /// Helper: start a minimal echo WebSocket server on a random port.
     /// Accepts one connection and echoes back text messages.
@@ -1146,13 +1155,10 @@ mod tests {
         // Give the server a moment to accept connections.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        type SinkType = futures_util::stream::SplitSink<
-            WebSocketStream<MaybeTlsStream<TcpStream>>,
-            Message,
-        >;
-        type ReadType = futures_util::stream::SplitStream<
-            WebSocketStream<MaybeTlsStream<TcpStream>>,
-        >;
+        type SinkType =
+            futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
+        type ReadType =
+            futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
         let ws_sink: Arc<tokio::sync::Mutex<Option<SinkType>>> =
             Arc::new(tokio::sync::Mutex::new(None));
@@ -1169,7 +1175,10 @@ mod tests {
         )
         .await;
 
-        assert!(result.0, "reconnect_attempt should succeed when server is live");
+        assert!(
+            result.0,
+            "reconnect_attempt should succeed when server is live"
+        );
 
         // Verify the sink and read socket were stored.
         assert!(

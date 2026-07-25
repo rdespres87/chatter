@@ -881,20 +881,24 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             _ = &mut shutdown_rx => {
-                info!("Shutdown signal received, waiting for {} active connections...", tasks.len());
+                info!("Shutdown signal received, closing listener...");
                 // Close the listener to unblock accept() and stop accepting new connections.
                 drop(listener);
-                // Wait for all active connections to finish.
-                while let Some(res) = tasks.join_next().await {
-                    if let Err(e) = res {
-                        error!("Connection task error during shutdown: {}", e);
-                    }
-                }
-                info!("All connections closed. Shutting down.");
+                info!("Listener closed. Shutting down (clients will reconnect).");
                 break;
             }
         }
     }
+
+    // Let already-connected clients finish gracefully, but don't block forever.
+    let shutdown_timeout = tokio::time::sleep(Duration::from_secs(5));
+    tokio::pin!(shutdown_timeout);
+    while !shutdown_timeout.is_elapsed() {
+        if tasks.join_next().await.is_none() {
+            break;
+        }
+    }
+    info!("Shutting down.");
 
     Ok(())
 }
