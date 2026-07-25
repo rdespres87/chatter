@@ -2,8 +2,8 @@ use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -16,6 +16,7 @@ use futures_util::{StreamExt, future, pin_mut, stream::TryStreamExt};
 use anyhow::Context;
 use log::{error, info, warn};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 
 use crate::account::{Account, RESERVED_ANONYMOUS_LOGIN};
@@ -580,9 +581,9 @@ fn account_backoff_remaining(
 ) -> std::result::Result<Option<Duration>, chatter_protocol::ServerMessage> {
     let peers = peer_map.read().map_err(|_| lock_peer_error())?;
     let peer = peers.get(&addr).ok_or_else(session_not_found_error)?;
-    Ok(peer.next_account_attempt.and_then(|next_attempt| {
-        next_attempt.checked_duration_since(Instant::now())
-    }))
+    Ok(peer
+        .next_account_attempt
+        .and_then(|next_attempt| next_attempt.checked_duration_since(Instant::now())))
 }
 
 fn record_account_failure(
@@ -592,7 +593,8 @@ fn record_account_failure(
     let mut peers = peer_map.write().map_err(|_| lock_peer_error())?;
     let peer = peers.get_mut(&addr).ok_or_else(session_not_found_error)?;
     peer.login_failures = peer.login_failures.saturating_add(1);
-    peer.next_account_attempt = Some(Instant::now() + account_backoff_duration(peer.login_failures));
+    peer.next_account_attempt =
+        Some(Instant::now() + account_backoff_duration(peer.login_failures));
     Ok(())
 }
 
@@ -615,7 +617,8 @@ fn set_authenticated_peer(
     let mut peers = peer_map.write().map_err(|_| lock_peer_error())?;
 
     // If this login is already used by a different peer, kick the old one
-    let old_addr = peers.iter()
+    let old_addr = peers
+        .iter()
         .find(|(_, peer)| peer.login == login && peer.login != RESERVED_ANONYMOUS_LOGIN)
         .map(|(k, _)| *k);
 
@@ -623,7 +626,12 @@ fn set_authenticated_peer(
         if kick_addr != addr {
             // Remove the old peer entry and announce departures
             if let Some(old_peer) = peers.remove(&kick_addr) {
-                announce_room_departures(peer_map, &kick_addr, &old_peer.login, old_peer.rooms.iter().cloned().collect());
+                announce_room_departures(
+                    peer_map,
+                    &kick_addr,
+                    &old_peer.login,
+                    old_peer.rooms.iter().cloned().collect(),
+                );
                 // Close the old connection by dropping the tx
                 drop(old_peer.tx);
             }
@@ -663,7 +671,10 @@ fn announce_room_departures(
             &room,
             &format!("[System] {} left the room", login),
         ) {
-            warn!("Failed to announce room departure for '{}': {}", login, error);
+            warn!(
+                "Failed to announce room departure for '{}': {}",
+                login, error
+            );
         }
     }
 }
@@ -701,7 +712,10 @@ fn authenticated_login(
         .ok_or_else(session_not_found_error)?;
 
     if login == RESERVED_ANONYMOUS_LOGIN {
-        Err(client_error_with_code("Login required.", "NOT_AUTHENTICATED"))
+        Err(client_error_with_code(
+            "Login required.",
+            "NOT_AUTHENTICATED",
+        ))
     } else {
         Ok(login)
     }
@@ -837,15 +851,49 @@ async fn main() -> anyhow::Result<()> {
         .context(format!("Failed to bind to {}", addr))?;
     info!("Listening on: {}", addr);
 
-    while let Ok((stream, stream_addr)) = listener.accept().await {
-        let state = state.clone();
-        let db = account_db.clone();
-        let rate_limiter = RateLimiter::new(RATE_LIMIT, RATE_WINDOW_SECS);
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(state, db, stream, stream_addr, rate_limiter).await {
-                error!("Connection error for {}: {}", stream_addr, e);
+    let mut tasks = JoinSet::new();
+
+    // Spawn a background task that listens for Ctrl+C and signals shutdown via oneshot.
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = shutdown_tx.send(());
+    });
+
+    loop {
+        tokio::select! {
+            result = listener.accept() => {
+                match result {
+                    Ok((stream, stream_addr)) => {
+                        let state = state.clone();
+                        let db = account_db.clone();
+                        let rate_limiter = RateLimiter::new(RATE_LIMIT, RATE_WINDOW_SECS);
+                        tasks.spawn(async move {
+                            if let Err(e) = handle_connection(state, db, stream, stream_addr, rate_limiter).await {
+                                error!("Connection error for {}: {}", stream_addr, e);
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        error!("Failed to accept connection: {}", e);
+                        break;
+                    }
+                }
             }
-        });
+            _ = &mut shutdown_rx => {
+                info!("Shutdown signal received, waiting for {} active connections...", tasks.len());
+                // Close the listener to unblock accept() and stop accepting new connections.
+                drop(listener);
+                // Wait for all active connections to finish.
+                while let Some(res) = tasks.join_next().await {
+                    if let Err(e) = res {
+                        error!("Connection task error during shutdown: {}", e);
+                    }
+                }
+                info!("All connections closed. Shutting down.");
+                break;
+            }
+        }
     }
 
     Ok(())
@@ -861,10 +909,7 @@ mod tests {
         {
             let mut peers_guard = map.write().unwrap();
             for (addr, tx, login, rooms) in peers {
-                peers_guard.insert(
-                    addr,
-                    Peer::new(tx, login, rooms.into_iter().collect()),
-                );
+                peers_guard.insert(addr, Peer::new(tx, login, rooms.into_iter().collect()));
             }
         }
         Arc::new(map)
@@ -898,7 +943,10 @@ mod tests {
 
         assert_eq!(
             authenticated_login(&peer_map, addr),
-            Err(client_error_with_code("Login required.", "NOT_AUTHENTICATED")),
+            Err(client_error_with_code(
+                "Login required.",
+                "NOT_AUTHENTICATED"
+            )),
             "An unauthenticated (anonymous) peer must not expose a login"
         );
     }
@@ -921,7 +969,12 @@ mod tests {
         let account_db = Account::new(":memory:".to_string()).unwrap();
         let addr = test_addr(8092);
         let (tx, mut rx) = futures_channel::mpsc::unbounded();
-        let peer_map = make_peer_map(vec![(addr, tx, RESERVED_ANONYMOUS_LOGIN.to_string(), vec![])]);
+        let peer_map = make_peer_map(vec![(
+            addr,
+            tx,
+            RESERVED_ANONYMOUS_LOGIN.to_string(),
+            vec![],
+        )]);
 
         process_data(
             chatter_protocol::ClientMessage::CreateAccount {
@@ -963,7 +1016,12 @@ mod tests {
 
         let addr = test_addr(8093);
         let (tx, mut rx) = futures_channel::mpsc::unbounded();
-        let peer_map = make_peer_map(vec![(addr, tx, RESERVED_ANONYMOUS_LOGIN.to_string(), vec![])]);
+        let peer_map = make_peer_map(vec![(
+            addr,
+            tx,
+            RESERVED_ANONYMOUS_LOGIN.to_string(),
+            vec![],
+        )]);
 
         process_data(
             chatter_protocol::ClientMessage::Login {
@@ -985,7 +1043,10 @@ mod tests {
         );
         assert_eq!(
             authenticated_login(&peer_map, addr),
-            Err(client_error_with_code("Login required.", "NOT_AUTHENTICATED")),
+            Err(client_error_with_code(
+                "Login required.",
+                "NOT_AUTHENTICATED"
+            )),
             "The peer must remain unauthenticated"
         );
 
@@ -1133,12 +1194,7 @@ mod tests {
         let (tx, mut rx) = futures_channel::mpsc::unbounded();
         let (other_tx, mut other_rx) = futures_channel::mpsc::unbounded();
         let peer_map = make_peer_map(vec![
-            (
-                addr,
-                tx,
-                "alice".to_string(),
-                vec!["general".to_string()],
-            ),
+            (addr, tx, "alice".to_string(), vec!["general".to_string()]),
             (
                 other_addr,
                 other_tx,
