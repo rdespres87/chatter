@@ -26,3 +26,4 @@ serde_json = "1.0.150"
 clap = { version = "4", features = ["derive"] }
 bytes = "1"
 unicode-width = "0.2"
+chrono = "0.4"

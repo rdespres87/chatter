@@ -91,6 +91,18 @@ enum InputMode {
     RoomList,         // Room list focused (Tab to exit)
 }
 
+/// Format a Unix timestamp (u64, seconds since epoch) into a human-readable string.
+/// Uses "HH:MM" for today's messages, "YYYY-MM-DD HH:MM" for older ones.
+pub fn format_timestamp(unix_ts: u64) -> String {
+    use chrono::{DateTime, Local};
+    let dt = DateTime::from_timestamp(unix_ts as i64, 0).map(|dt| dt.with_timezone(&Local));
+    match dt {
+        Some(dt) if dt.date_naive() == Local::now().date_naive() => dt.format("%H:%M").to_string(),
+        Some(dt) => dt.format("%Y-%m-%d %H:%M").to_string(),
+        None => "—".to_string(),
+    }
+}
+
 impl App {
     /// Creates a new App instance. The WebSocket connection is attempted
     /// in a background task — this method returns immediately.
@@ -749,7 +761,9 @@ impl App {
                                                 .map(|entry| {
                                                     format!(
                                                         "[{}] {}: {}",
-                                                        entry.timestamp, entry.login, entry.message
+                                                        format_timestamp(entry.timestamp as u64),
+                                                        entry.login,
+                                                        entry.message
                                                     )
                                                 })
                                                 .collect();
@@ -1099,6 +1113,41 @@ mod tests {
     use super::*;
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
+
+    #[test]
+    fn format_timestamp_today_returns_hh_mm() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let result = format_timestamp(now);
+        // Should be HH:MM format (5 chars + colon)
+        assert_eq!(result.len(), 5);
+        assert_eq!(&result[2..3], ":");
+    }
+
+    #[test]
+    fn format_timestamp_yesterday_returns_date_time() {
+        // 2024-01-15 10:30:00 UTC — un timestamp fixe pour éviter les problèmes de TZ
+        let result = format_timestamp(1705312200);
+        // Should be YYYY-MM-DD HH:MM format (16 chars)
+        assert_eq!(result.len(), 16);
+        assert_eq!(&result[4..5], "-");
+        assert_eq!(&result[13..14], ":");
+    }
+
+    #[test]
+    fn format_timestamp_far_future_returns_dash() {
+        // i64::MAX seconds from epoch is far in the future (overflow)
+        let result = format_timestamp(i64::MAX as u64);
+        assert_eq!(result, "—");
+    }
+
+    #[test]
+    fn format_timestamp_epoch_returns_1970_date() {
+        let result = format_timestamp(0);
+        assert!(result.starts_with("1970-01-01"));
+    }
 
     type SinkType =
         futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
