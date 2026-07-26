@@ -450,6 +450,11 @@ impl App {
     }
 
     async fn join_room(&mut self, room: String) {
+        // Prevent double join — if already in this room, do nothing.
+        if self.room == room && !room.is_empty() {
+            return;
+        }
+
         if self.room != room {
             if !self.room.is_empty()
                 && let Err(e) = self
