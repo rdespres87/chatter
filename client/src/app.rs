@@ -450,18 +450,13 @@ impl App {
     }
 
     async fn join_room(&mut self, room: String) {
-        // Prevent double join — if already in this room, do nothing.
-        if self.room == room && !room.is_empty() {
-            return;
-        }
-
-        if self.room != room {
-            if !self.room.is_empty()
-                && let Err(e) = self
-                    .send_client_message(chatter_protocol::ClientMessage::LeaveRoom {
-                        room: self.room.clone(),
-                    })
-                    .await
+        // Clear messages when switching rooms.
+        if self.room != room && !self.room.is_empty() {
+            if let Err(e) = self
+                .send_client_message(chatter_protocol::ClientMessage::LeaveRoom {
+                    room: self.room.clone(),
+                })
+                .await
             {
                 log::error!("Leave room error: {}", e);
             }
@@ -535,16 +530,25 @@ impl App {
                         std::future::pending().await
                     }
                 } => {
+                    // Capture whether we were logged in before reconnect logic modifies state.
+                    let had_login = self.was_logged_in;
+
                     if let Some((connected, re_login_performed)) = result {
-                    if connected {
-                        // Reconnect succeeded — create a new connected event handler.
-                        self.connected = true;
-                        self.reconnect_pending = false;
-                        self.messages.push("[System] Reconnected.".to_string());
-                        if re_login_performed {
+                        if connected {
+                            // Reconnect succeeded — create a new connected event handler.
+                            self.connected = true;
+                            self.reconnect_pending = false;
+                            self.messages.push("[System] Reconnected.".to_string());
+                            if re_login_performed {
                                 // Auto-relogin succeeded — go straight to room view.
                                 self.logged_in = true;
-                                self.was_logged_in = false;
+                                // Preserve was_logged_in so next disconnect can also auto-relogin.
+                                self.was_logged_in = true;
+                                // Restore room context. reset_room_on_disconnect() cleared
+                                // self.room, but the event handler won't receive LoginOk
+                                // (it was consumed by reconnect_attempt), so join_room()
+                                // won't be called. We must explicitly rejoin here.
+                                self.room = "general".to_string();
                                 let initial_read = {
                                     let mut guard = self.initial_read.lock().unwrap();
                                     guard.take()
@@ -552,6 +556,8 @@ impl App {
                                 if let Some(read) = initial_read {
                                     self.events = EventHandler::connected(read, self.ws_sink.clone()).await;
                                 }
+                                // Send JoinRoom so the server knows we re-joined after reconnect.
+                                self.join_room("general".to_string()).await;
                             } else if self.was_logged_in {
                                 // Re-authentication needed after disconnect — switch to
                                 // login flow with saved credentials.
@@ -577,6 +583,24 @@ impl App {
                                 if let Some(read) = initial_read {
                                     self.events = EventHandler::connected(read, self.ws_sink.clone()).await;
                                 }
+                            }
+
+                            // Safety net: if we were logged in before reconnect, restore state.
+                            // This handles the case where reconnect_attempt returned (true, false)
+                            // but the user was actually logged in (credentials existed).
+                            if had_login {
+                                self.logged_in = true;
+                                if self.room.is_empty() {
+                                    self.room = "general".to_string();
+                                }
+                            }
+
+                            // Create event handler from initial_read if still available.
+                            if let Some(initial_read) = {
+                                let mut guard = self.initial_read.lock().unwrap();
+                                guard.take()
+                            } {
+                                self.events = EventHandler::connected(initial_read, self.ws_sink.clone()).await;
                             }
                         } else {
                             // Reconnect failed — push message and go back to splash.
@@ -880,14 +904,10 @@ impl App {
             const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
             match tokio::time::timeout(CONNECT_TIMEOUT, connect_async(url.as_str())).await {
                 Ok(Ok((ws_stream, _))) => {
-                    let (write, read) = ws_stream.split();
+                    let (write, mut read) = ws_stream.split();
                     {
                         let mut sink_guard = ws_sink.lock().await;
                         *sink_guard = Some(write);
-                    }
-                    {
-                        let mut read_guard = initial_read.lock().unwrap();
-                        *read_guard = Some(read);
                     }
 
                     // Auto-relogin if credentials are available and non-empty
@@ -908,11 +928,64 @@ impl App {
                                 let mut sink_guard = ws_sink.lock().await;
                                 if let Some(ref mut sink) = *sink_guard {
                                     if sink.send(msg).await.is_ok() {
-                                        return (true, true);
+                                        // Wait for the server's response to verify login success.
+                                        // Read the first message from the stream.
+                                        use futures::StreamExt;
+                                        let first_response = tokio::time::timeout(
+                                            std::time::Duration::from_secs(5),
+                                            read.next(),
+                                        )
+                                        .await;
+                                        match first_response {
+                                            Ok(Some(Ok(response_msg))) => {
+                                                // Check if the response is a success indicator.
+                                                // The server sends LoginOk followed by RoomList.
+                                                // We only need to verify the first message is a success.
+                                                let text = match response_msg.into_text() {
+                                                    Ok(t) => t.to_string(),
+                                                    Err(_) => return (true, false),
+                                                };
+                                                // LoginOk and AccountCreated indicate success.
+                                                if text.contains("\"LoginOk\"")
+                                                    || text.contains("\"AccountCreated\"")
+                                                {
+                                                    // Store the remaining read stream for the main task.
+                                                    // The RoomList (2nd message) will be handled by the event handler.
+                                                    {
+                                                        let mut read_guard =
+                                                            initial_read.lock().unwrap();
+                                                        *read_guard = Some(read);
+                                                    }
+                                                    return (true, true);
+                                                }
+                                                // LoginFailed or Error — login did not succeed.
+                                                {
+                                                    let mut read_guard =
+                                                        initial_read.lock().unwrap();
+                                                    *read_guard = Some(read);
+                                                }
+                                                return (true, false);
+                                            }
+                                            _ => {
+                                                // No response or parse error — login likely failed.
+                                                {
+                                                    let mut read_guard =
+                                                        initial_read.lock().unwrap();
+                                                    *read_guard = Some(read);
+                                                }
+                                                return (true, false);
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
+                    }
+
+                    // Store the read stream for the main task.
+                    {
+                        let mut read_guard = initial_read.lock().unwrap();
+                        *read_guard = Some(read);
                     }
                     return (true, false);
                 }
