@@ -47,9 +47,6 @@ pub struct App {
     password_character_index: usize,
     rooms: Vec<String>,
     room_selected: usize,
-    /// Rooms the user was in before a disconnection (saved for re-join after reconnect).
-    #[allow(dead_code)]
-    prev_rooms: Vec<String>,
     /// Whether we're in login or register flow.
     auth_mode: AuthMode,
     /// Handle for the initial connection task. Dropped once connection succeeds or fails.
@@ -172,7 +169,6 @@ impl App {
             password_character_index: 0,
             rooms: default_rooms(),
             room_selected: 0,
-            prev_rooms: Vec::new(),
             auth_mode: AuthMode::Login,
             connecting_task,
             connect_notify: Some(connect_rx),
