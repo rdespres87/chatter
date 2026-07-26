@@ -690,6 +690,14 @@ fn join_peer_room(
 ) -> std::result::Result<(), chatter_protocol::ServerMessage> {
     let mut peers = peer_map.write().map_err(|_| lock_peer_error())?;
     let peer = peers.get_mut(&addr).ok_or_else(session_not_found_error)?;
+
+    if peer.rooms.contains(&room) {
+        return Err(client_error_with_code(
+            &format!("You are already in room '{}'", room),
+            "ALREADY_IN_ROOM",
+        ));
+    }
+
     peer.rooms.insert(room);
     Ok(())
 }
@@ -1301,5 +1309,49 @@ mod tests {
         assert!(limiter.check(addr_b, now));
         assert!(limiter.check(addr_b, now + std::time::Duration::from_millis(100)));
         assert!(!limiter.check(addr_b, now + std::time::Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn test_join_peer_room_double_join_returns_error() {
+        let addr = test_addr(9005);
+        let (tx, _rx) = futures_channel::mpsc::unbounded();
+        let peer_map = make_peer_map(vec![(
+            addr,
+            tx,
+            "alice".to_string(),
+            vec!["general".into()],
+        )]);
+
+        // First join should succeed (idempotent — already in room)
+        let result = join_peer_room(&peer_map, addr, "general".into());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            chatter_protocol::ServerMessage::Error { code, message } => {
+                assert_eq!(code, "ALREADY_IN_ROOM");
+                assert!(message.contains("already in room"));
+            }
+            other => panic!("Expected Error variant, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_join_peer_room_allows_different_room() {
+        let addr = test_addr(9006);
+        let (tx, _rx) = futures_channel::mpsc::unbounded();
+        let peer_map = make_peer_map(vec![(
+            addr,
+            tx,
+            "alice".to_string(),
+            vec!["general".into()],
+        )]);
+
+        // Joining a different room should succeed
+        assert!(join_peer_room(&peer_map, addr, "rust".into()).is_ok());
+
+        // Verify peer is now in both rooms
+        let peers = peer_map.read().unwrap();
+        let peer = peers.get(&addr).unwrap();
+        assert!(peer.rooms.contains("general"));
+        assert!(peer.rooms.contains("rust"));
     }
 }
