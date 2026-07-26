@@ -484,6 +484,10 @@ pub(crate) fn broadcast_to_room(
         login: login.to_string(),
         room: room.to_string(),
         message: message.to_string(),
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64,
     };
     let json = chatter_protocol::serialize_server_message(&broadcast_msg)
         .context("Failed to serialize message")?;
@@ -1159,14 +1163,19 @@ mod tests {
         .await;
 
         let departure = next_server_message(&mut other_rx).await;
-        assert_eq!(
-            departure,
+        match &departure {
             chatter_protocol::ServerMessage::IncomingMessage {
-                login: "old-login".to_string(),
-                room: "general".to_string(),
-                message: "[System] old-login left the room".to_string(),
+                login,
+                room,
+                message,
+                ..
+            } => {
+                assert_eq!(login, "old-login");
+                assert_eq!(room, "general");
+                assert_eq!(message, "[System] old-login left the room");
             }
-        );
+            other => panic!("Expected IncomingMessage, got {other:?}"),
+        }
 
         let login_ok = next_server_message(&mut rx).await;
         assert_eq!(
@@ -1213,14 +1222,19 @@ mod tests {
         .await;
 
         let departure = next_server_message(&mut other_rx).await;
-        assert_eq!(
-            departure,
+        match &departure {
             chatter_protocol::ServerMessage::IncomingMessage {
-                login: "alice".to_string(),
-                room: "general".to_string(),
-                message: "[System] alice left the room".to_string(),
+                login,
+                room,
+                message,
+                ..
+            } => {
+                assert_eq!(login, "alice");
+                assert_eq!(room, "general");
+                assert_eq!(message, "[System] alice left the room");
             }
-        );
+            other => panic!("Expected IncomingMessage, got {other:?}"),
+        }
 
         let failed = next_server_message(&mut rx).await;
         assert_eq!(

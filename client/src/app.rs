@@ -93,7 +93,7 @@ enum InputMode {
 
 /// Format a Unix timestamp (u64, seconds since epoch) into a human-readable string.
 /// Uses "HH:MM" for today's messages, "YYYY-MM-DD HH:MM" for older ones.
-pub fn format_timestamp(unix_ts: u64) -> String {
+pub fn format_timestamp(unix_ts: i64) -> String {
     use chrono::{DateTime, Local};
     let dt = DateTime::from_timestamp(unix_ts as i64, 0).map(|dt| dt.with_timezone(&Local));
     match dt {
@@ -729,11 +729,21 @@ impl App {
                                         login,
                                         room,
                                         message,
+                                        timestamp,
                                     } => {
                                         if login == "Server" && room == "system" {
-                                            self.messages.push(format!("[System] {}", message));
+                                            self.messages.push(format!(
+                                                "[{}] [System] {}",
+                                                format_timestamp(timestamp),
+                                                message
+                                            ));
                                         } else if room == self.room {
-                                            self.messages.push(format!("[{}] {}", login, message));
+                                            self.messages.push(format!(
+                                                "[{}] {}: {}",
+                                                format_timestamp(timestamp),
+                                                login,
+                                                message
+                                            ));
                                         }
                                         // Trim to MAX_HISTORY (keep most recent)
                                         if self.messages.len() > MAX_HISTORY {
@@ -761,7 +771,7 @@ impl App {
                                                 .map(|entry| {
                                                     format!(
                                                         "[{}] {}: {}",
-                                                        format_timestamp(entry.timestamp as u64),
+                                                        format_timestamp(entry.timestamp),
                                                         entry.login,
                                                         entry.message
                                                     )
@@ -1120,7 +1130,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let result = format_timestamp(now);
+        let result = format_timestamp(now as i64);
         // Should be HH:MM format (5 chars + colon)
         assert_eq!(result.len(), 5);
         assert_eq!(&result[2..3], ":");
@@ -1139,7 +1149,7 @@ mod tests {
     #[test]
     fn format_timestamp_far_future_returns_dash() {
         // i64::MAX seconds from epoch is far in the future (overflow)
-        let result = format_timestamp(i64::MAX as u64);
+        let result = format_timestamp(i64::MAX);
         assert_eq!(result, "—");
     }
 

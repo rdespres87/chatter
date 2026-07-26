@@ -89,6 +89,7 @@ pub enum ServerMessage {
         login: String,
         room: String,
         message: String,
+        timestamp: i64,
     },
     /// Server sends available rooms list.
     RoomList { rooms: Vec<String> },
@@ -359,10 +360,11 @@ fn validate_server_message(message: &ServerMessage) -> Result<()> {
             login,
             room,
             message,
+            timestamp: _,
         } => {
             validate_required_text(login, "login", MAX_LOGIN_LEN)?;
             validate_required_text(room, "room", MAX_ROOM_LEN)?;
-            validate_required_text(message, "message", MAX_CHAT_MESSAGE_LEN)?;
+            validate_no_control_chars(message, "Message")?;
         }
         ServerMessage::RoomList { rooms } => {
             if rooms.len() > MAX_HISTORY_ENTRIES {
@@ -437,6 +439,20 @@ pub fn create_account(login: String, passwd: String) -> Result<String> {
     serialize_client_message(&ClientMessage::CreateAccount { login, passwd })
 }
 
+pub fn create_incoming_message(
+    login: String,
+    room: String,
+    message: String,
+    timestamp: i64,
+) -> Result<String> {
+    serialize_server_message(&ServerMessage::IncomingMessage {
+        login,
+        room,
+        message,
+        timestamp,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,6 +505,7 @@ mod tests {
                 login: "alice".to_string(),
                 room: "general".to_string(),
                 message: "Hello from the server".to_string(),
+                timestamp: 1_735_732_800,
             },
             ServerMessage::RoomList {
                 rooms: vec!["general".to_string(), "random".to_string()],
@@ -863,12 +880,46 @@ mod tests {
             login: "bob".to_string(),
             room: "random".to_string(),
             message: "Hi there!".to_string(),
+            timestamp: 1_735_732_800,
         };
 
         let json = serialize_server_message(&msg).unwrap();
         let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn server_incoming_message_serializes_with_timestamp() {
+        let msg = ServerMessage::IncomingMessage {
+            login: "alice".to_string(),
+            room: "general".to_string(),
+            message: "hello".to_string(),
+            timestamp: 1_700_000_000,
+        };
+
+        let json = create_incoming_message(
+            "alice".to_string(),
+            "general".to_string(),
+            "hello".to_string(),
+            1_700_000_000,
+        )
+        .unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::IncomingMessage {
+                login,
+                room,
+                message,
+                timestamp,
+            } => {
+                assert_eq!(login, "alice");
+                assert_eq!(room, "general");
+                assert_eq!(message, "hello");
+                assert_eq!(timestamp, 1_700_000_000);
+            }
+            _ => panic!("Expected IncomingMessage"),
+        }
     }
 
     #[test]
@@ -926,6 +977,7 @@ mod tests {
             login: "alice".to_string(),
             room: "general".to_string(),
             message: "hello\u{1b}[2J".to_string(),
+            timestamp: 1_735_732_800,
         };
         let room_list = ServerMessage::RoomList {
             rooms: vec!["bad\u{1b}".to_string()],
@@ -1036,7 +1088,7 @@ mod tests {
     #[test]
     fn parse_client_message_rejects_server_variant() {
         let result = parse_client_message(text_message(
-            r#"{"IncomingMessage":{"login":"alice","room":"general","message":"Hi!"}}"#,
+            r#"{"IncomingMessage":{"login":"alice","room":"general","message":"Hi!","timestamp":0}}"#,
         ));
 
         assert!(result.is_err());
@@ -1134,7 +1186,7 @@ mod tests {
     #[test]
     fn parse_server_message_parses_text_frame() {
         let result = parse_server_message(text_message(
-            r#"{"IncomingMessage":{"login":"alice","room":"general","message":"Hi!"}}"#,
+            r#"{"IncomingMessage":{"login":"alice","room":"general","message":"Hi!","timestamp":0}}"#,
         ));
 
         assert_eq!(
@@ -1143,6 +1195,7 @@ mod tests {
                 login: "alice".to_string(),
                 room: "general".to_string(),
                 message: "Hi!".to_string(),
+                timestamp: 0,
             }
         );
     }
