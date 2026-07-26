@@ -31,7 +31,7 @@ WebSocket chat server built with:
 - **SQLite** (via `rusqlite`) — Account storage with bcrypt password hashing
 - Room-based message broadcasting
 - Login rate limiting with exponential backoff
-- Room history retrieval (last 50 messages)
+- Room history retrieval (all messages, limited by i32::MAX)
 
 Listens on port `8080` by default.
 
