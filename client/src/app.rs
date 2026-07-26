@@ -775,7 +775,7 @@ impl App {
                                             self.login_character_index = 0;
                                             self.input_mode = InputMode::Splash;
                                         } else {
-                                            self.messages.push(format!("[System] Error: {}", message));
+                                            self.messages.push(format!("[System] [{}] {}", code, message));
                                         }
                                         self.password_input.clear();
                                         self.password_character_index = 0;
