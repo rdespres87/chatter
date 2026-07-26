@@ -544,6 +544,7 @@ impl App {
                         if re_login_performed {
                                 // Auto-relogin succeeded — go straight to room view.
                                 self.logged_in = true;
+                                self.was_logged_in = false;
                                 let initial_read = {
                                     let mut guard = self.initial_read.lock().unwrap();
                                     guard.take()
