@@ -13,6 +13,7 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio::sync::watch;
 use unicode_width::UnicodeWidthStr;
@@ -388,7 +389,12 @@ impl App {
         match key.code {
             KeyCode::Enter if !self.input.is_empty() => {
                 let msg = self.input.clone();
-                self.messages.push(format!("[me] {}", msg));
+                let ts = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                self.messages
+                    .push(format!("[{}] [me] {}", format_timestamp(ts), msg));
                 if let Err(e) = self
                     .send_client_message(chatter_protocol::ClientMessage::SendMessage {
                         room: self.room.clone(),
@@ -658,11 +664,14 @@ impl App {
                         Event::App(AppEvent::Quit) => self.quit(),
                         // Reconnect is handled via reconnect_rx, not events channel.
                         Event::App(AppEvent::Reconnect) => {},
-                        Event::App(AppEvent::Disconnected) => {
+                        Event::App(AppEvent::Disconnected { close_code, close_reason }) => {
                             self.was_logged_in = self.logged_in;
                             self.connected = false;
-                            self.messages
-                                .push("[System] Disconnected from server.".to_string());
+                            if let (Some(code), Some(reason)) = (close_code, close_reason) {
+                                self.messages.push(format!("[System] Disconnected from server (close code: {code}, reason: {reason})."));
+                            } else {
+                                self.messages.push("[System] Disconnected from server.".to_string());
+                            }
                             self.reset_room_on_disconnect();
                             // Spawn background reconnect task (with initial delay).
                             let url = self.url.clone();

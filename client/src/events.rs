@@ -39,7 +39,12 @@ pub enum AppEvent {
     /// Received a message from the web socket.
     ReceivedMsg { data: Message },
     /// The server closed the connection (close frame received or stream ended).
-    Disconnected,
+    Disconnected {
+        /// WebSocket close code if a Close frame was received.
+        close_code: Option<u16>,
+        /// WebSocket close reason if a Close frame was received.
+        close_reason: Option<String>,
+    },
     /// The web socket failed with a transport error.
     ConnectionError { reason: String },
     /// User requested a reconnect attempt (Enter key pressed after initial failure).
@@ -240,9 +245,14 @@ impl EventSocketTask {
                 Ok(msg @ Message::Text(_)) => {
                     self.send(AppEvent::ReceivedMsg { data: msg });
                 }
-                Ok(Message::Close(_)) => {
-                    info!("Socket is closed");
-                    self.send(AppEvent::Disconnected);
+                Ok(Message::Close(frame)) => {
+                    let close_code = frame.as_ref().map(|f| f.code.into());
+                    let close_reason = frame.as_ref().map(|f| f.reason.to_string());
+                    info!("Socket closed: code={close_code:?}, reason={close_reason:?}");
+                    self.send(AppEvent::Disconnected {
+                        close_code,
+                        close_reason,
+                    });
                     return;
                 }
                 Ok(Message::Pong(_)) => {
@@ -271,7 +281,10 @@ impl EventSocketTask {
             }
         }
         // Stream ended without a close frame (e.g. the TCP connection dropped).
-        self.send(AppEvent::Disconnected);
+        self.send(AppEvent::Disconnected {
+            close_code: None,
+            close_reason: None,
+        });
     }
 
     /// Sends an app event to the receiver.
@@ -361,7 +374,10 @@ impl HeartbeatTask {
                 Ok(None) => {
                     // Pong channel closed — socket task exited.
                     self.event_sender
-                        .send(Event::App(AppEvent::Disconnected))
+                        .send(Event::App(AppEvent::Disconnected {
+                            close_code: None,
+                            close_reason: None,
+                        }))
                         .ok();
                     return;
                 }
