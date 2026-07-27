@@ -557,7 +557,13 @@ impl RateLimiter {
         let window = std::time::Duration::from_secs(self.window_secs);
         let cutoff = now.checked_sub(window).unwrap_or(now);
 
-        let mut map = MAP.lock().unwrap();
+        let mut map = match MAP.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("Rate limiter lock poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
 
         let timestamps = map.entry(addr).or_insert_with(Vec::new);
         timestamps.retain(|t| *t > cutoff);
