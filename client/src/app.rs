@@ -1416,7 +1416,12 @@ fn default_rooms() -> Vec<String> {
 
 /// Calculate the visual column position for a cursor at `char_index` in `text`.
 fn cursor_visual_x(text: &str, char_index: usize) -> u16 {
-    text[..char_index.min(text.len())].width() as u16 + 1 // +1 for the text area padding inside the block
+    let byte_index = text
+        .char_indices()
+        .map(|(i, _)| i)
+        .nth(char_index)
+        .unwrap_or(text.len());
+    text[..byte_index].width() as u16 + 1 // +1 for the text area padding inside the block
 }
 
 fn is_not_authenticated_error(code: &str) -> bool {
@@ -1715,5 +1720,29 @@ mod tests {
             "reconnect_attempt with initial delay should take at least ~2s, took {:?}",
             elapsed
         );
+    }
+
+    #[test]
+    fn cursor_visual_x_handles_multibyte_utf8() {
+        // "ça" = display width 2 (c=1, ç=1)
+        let text = "ça";
+        // char_index=0 → before 'c'
+        assert_eq!(cursor_visual_x(text, 0), 1);
+        // char_index=1 → between 'c' and 'ç'
+        assert_eq!(cursor_visual_x(text, 1), 2);
+        // char_index=2 → after 'ç' (end of string)
+        assert_eq!(cursor_visual_x(text, 2), 3);
+        // char_index > chars().count() → clamp to end
+        assert_eq!(cursor_visual_x(text, 100), 3);
+    }
+
+    #[test]
+    fn cursor_visual_x_handles_emoji() {
+        // "é😀a" = display width 4 (é=1, 😀=2, a=1)
+        let text = "é😀a";
+        assert_eq!(cursor_visual_x(text, 0), 1);
+        assert_eq!(cursor_visual_x(text, 1), 2); // after 'é'
+        assert_eq!(cursor_visual_x(text, 2), 4); // after '😀'
+        assert_eq!(cursor_visual_x(text, 3), 5); // after 'a'
     }
 }
