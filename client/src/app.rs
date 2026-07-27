@@ -433,7 +433,7 @@ impl App {
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
-                let formatted = format!("[{}] [me] {}", format_timestamp(ts), msg);
+                let formatted = format!("[{}] me: {}", format_timestamp(ts), msg);
                 self.messages.push(formatted.clone());
                 if let Err(e) = self
                     .send_client_message(chatter_protocol::ClientMessage::SendMessage {
