@@ -532,6 +532,15 @@ impl App {
         self.room_selected = 0;
     }
 
+    /// Resolve the display sender: "me" if the server login matches the current user.
+    fn resolve_sender(current_user: &str, server_login: &str) -> String {
+        if server_login == current_user {
+            "me".to_string()
+        } else {
+            server_login.to_string()
+        }
+    }
+
     // --- Main loop ---
 
     pub async fn run(mut self, mut terminal: ratatui::DefaultTerminal) -> color_eyre::Result<()> {
@@ -871,7 +880,7 @@ impl App {
                                             self.messages.push(format!(
                                                 "[{}] {}: {}",
                                                 format_timestamp(timestamp),
-                                                login,
+                                                Self::resolve_sender(&self.login, &login),
                                                 message
                                             ));
                                         }
@@ -902,7 +911,7 @@ impl App {
                                                     format!(
                                                         "[{}] {}: {}",
                                                         format_timestamp(entry.timestamp),
-                                                        entry.login,
+                                                        Self::resolve_sender(&self.login, &entry.login),
                                                         entry.message
                                                     )
                                                 })
