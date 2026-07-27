@@ -71,8 +71,6 @@ pub struct App {
     reconnect_rx: tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     /// Unified connection/authentication state.
     connection_state: ConnectionState,
-    /// Debug log for reconnect_attempt (displayed in UI).
-    debug_log: Vec<String>,
 }
 
 /// Whether the user is logging in or creating an account.
@@ -171,7 +169,7 @@ impl App {
                     Ok(Ok((ws_stream, _))) => {
                         let (sink, stream) = ws_stream.split();
                         *write_socket.lock().await = Some(sink);
-                        *initial_read.lock().unwrap() = Some(stream);
+                        *initial_read.lock().expect("lock initial_read for initial connection") = Some(stream);
                         let _ = connect_tx.send(true);
                     }
                     Ok(Err(e)) => {
@@ -213,7 +211,6 @@ impl App {
             reconnect_tx: Some(reconnect_tx),
             reconnect_rx,
             connection_state: ConnectionState::Disconnected { had_login: false },
-            debug_log: Vec::new(),
         })
     }
 
@@ -553,7 +550,7 @@ impl App {
         if let Some(_task) = self.connecting_task.take() {
             // Check without blocking: try to extract the read side.
             let initial_read = {
-                let mut guard = self.initial_read.lock().unwrap();
+                let mut guard = self.initial_read.lock().expect("lock initial_read");
                 guard.take()
             };
             if let Some(read) = initial_read {
@@ -568,7 +565,7 @@ impl App {
         }
 
         // Reconnect task handle. Spawned when disconnected, completed when reconnected or failed.
-        let mut reconnect_task: Option<tokio::task::JoinHandle<(bool, bool, String, Vec<String>)>> =
+        let mut reconnect_task: Option<tokio::task::JoinHandle<(bool, bool, String)>> =
             None;
         let mut connect_notify = self.connect_notify.take();
 
@@ -599,17 +596,7 @@ impl App {
                     // connection_state is Disconnected { had_login } at this point.
                     let had_login = matches!(self.connection_state, ConnectionState::Disconnected { had_login: true });
 
-                    if let Some((connected, re_login_performed, room, debug_entries)) = result {
-                        // Push debug entries to the UI if available.
-                        if !debug_entries.is_empty() {
-                            self.debug_log = debug_entries;
-                        }
-
-                        self.debug_log.push(format!(
-                            "RECONNECT RESULT: connected={}, re_login_performed={}, room='{}', had_login={}",
-                            connected, re_login_performed, room, had_login
-                        ));
-
+                    if let Some((connected, re_login_performed, room)) = result {
                         if connected {
                             // Reconnect succeeded — create a new connected event handler.
                             self.connection_state = ConnectionState::Connected;
@@ -625,7 +612,7 @@ impl App {
                                 // won't be called. We must explicitly rejoin here.
                                 self.room = room.clone();
                                 let initial_read = {
-                                    let mut guard = self.initial_read.lock().unwrap();
+                                    let mut guard = self.initial_read.lock().expect("lock initial_read");
                                     guard.take()
                                 };
                                 if let Some(read) = initial_read {
@@ -643,7 +630,7 @@ impl App {
                                 self.password_character_index = 0;
                                 self.input_mode = InputMode::EnteringLogin;
                                 let initial_read = {
-                                    let mut guard = self.initial_read.lock().unwrap();
+                                    let mut guard = self.initial_read.lock().expect("lock initial_read");
                                     guard.take()
                                 };
                                 if let Some(read) = initial_read {
@@ -654,7 +641,7 @@ impl App {
                                 // Go back to splash screen (user was never logged in).
                                 self.input_mode = InputMode::Splash;
                                 let initial_read = {
-                                    let mut guard = self.initial_read.lock().unwrap();
+                                    let mut guard = self.initial_read.lock().expect("lock initial_read");
                                     guard.take()
                                 };
                                 if let Some(read) = initial_read {
@@ -664,7 +651,7 @@ impl App {
 
                             // Create event handler from initial_read if still available.
                             if let Some(initial_read) = {
-                                let mut guard = self.initial_read.lock().unwrap();
+                                let mut guard = self.initial_read.lock().expect("lock initial_read");
                                 guard.take()
                             } {
                                 self.events = EventHandler::connected(initial_read, self.ws_sink.clone()).await;
@@ -697,7 +684,7 @@ impl App {
                         self.reconnect_pending = false;
                         self.messages.push("[System] Connection established.".to_string());
                         let initial_read = {
-                            let mut guard = self.initial_read.lock().unwrap();
+                            let mut guard = self.initial_read.lock().expect("lock initial_read");
                             guard.take()
                         };
                         if let Some(read) = initial_read {
@@ -714,14 +701,8 @@ impl App {
                             let url = self.url.clone();
                             let ws_sink = self.ws_sink.clone();
                             let initial_read = self.initial_read.clone();
-                            let debug_log = Arc::new(std::sync::Mutex::new(Vec::new()));
-                            let debug_log_clone = debug_log.clone();
                             reconnect_task = Some(tokio::spawn(async move {
-                                let result = App::reconnect_attempt(url, ws_sink, initial_read, None, None, String::new(), true, debug_log_clone.clone()).await;
-                                let debug_entries = Arc::into_inner(debug_log_clone)
-                                    .map(|m| m.into_inner().unwrap())
-                                    .unwrap_or_default();
-                                (result.0, result.1, result.2, debug_entries)
+                                App::reconnect_attempt(url, ws_sink, initial_read, None, None, String::new(), true).await
                             }));
                         }
                     }
@@ -737,14 +718,8 @@ impl App {
                             let initial_read = self.initial_read.clone();
                             let login = self.login.clone();
                             let password = self.password_input.clone();
-                            let debug_log = Arc::new(std::sync::Mutex::new(Vec::new()));
-                            let debug_log_clone = debug_log.clone();
                             reconnect_task = Some(tokio::spawn(async move {
-                                let result = App::reconnect_attempt(url, ws_sink, initial_read, Some(login), Some(password), String::new(), true, debug_log_clone.clone()).await;
-                                let debug_entries = Arc::into_inner(debug_log_clone)
-                                    .map(|m| m.into_inner().unwrap())
-                                    .unwrap_or_default();
-                                (result.0, result.1, result.2, debug_entries)
+                                App::reconnect_attempt(url, ws_sink, initial_read, Some(login), Some(password), String::new(), true).await
                             }));
                         }
                     }
@@ -795,14 +770,8 @@ impl App {
                             let login = self.login.clone();
                             let password = self.reconnect_password.clone();
                             let current_room = previous_room;
-                            let debug_log = Arc::new(std::sync::Mutex::new(Vec::new()));
-                            let debug_log_clone = debug_log.clone();
                             reconnect_task = Some(tokio::spawn(async move {
-                                let result = App::reconnect_attempt(url, ws_sink, initial_read, Some(login), password, current_room, false, debug_log_clone.clone()).await;
-                                let debug_entries = Arc::into_inner(debug_log_clone)
-                                    .map(|m| m.into_inner().unwrap())
-                                    .unwrap_or_default();
-                                (result.0, result.1, result.2, debug_entries)
+                                App::reconnect_attempt(url, ws_sink, initial_read, Some(login), password, current_room, false).await
                             }));
                         }
                         Event::App(AppEvent::ConnectionError { reason }) => {
@@ -819,14 +788,8 @@ impl App {
                             let login = self.login.clone();
                             let password = self.reconnect_password.clone();
                             let current_room = self.room.clone();
-                            let debug_log = Arc::new(std::sync::Mutex::new(Vec::new()));
-                            let debug_log_clone = debug_log.clone();
                             reconnect_task = Some(tokio::spawn(async move {
-                                let result = App::reconnect_attempt(url, ws_sink, initial_read, Some(login), password, current_room, true, debug_log_clone.clone()).await;
-                                let debug_entries = Arc::into_inner(debug_log_clone)
-                                    .map(|m| m.into_inner().unwrap())
-                                    .unwrap_or_default();
-                                (result.0, result.1, result.2, debug_entries)
+                                App::reconnect_attempt(url, ws_sink, initial_read, Some(login), password, current_room, true).await
                             }));
                         }
                         Event::App(AppEvent::ReceivedMsg { data }) => {
@@ -990,17 +953,10 @@ impl App {
         password: Option<String>,
         current_room: String,
         skip_initial_delay: bool,
-        debug_log: Arc<std::sync::Mutex<Vec<String>>>,
-    ) -> (bool, bool, String, Vec<String>) {
-        // (connected, re-login_performed, room, debug_log)
+    ) -> (bool, bool, String) {
+        // (connected, re-login_performed, room)
         let mut retry_delay = std::time::Duration::from_secs(2);
         let max_delay = std::time::Duration::from_secs(60);
-
-        // Log: start of reconnect attempt
-        debug_log
-            .lock()
-            .unwrap()
-            .push("RECONNECT: starting attempt".into());
 
         // Skip the initial delay when the user manually retries — they just pressed
         // Enter and expect an immediate attempt.
@@ -1012,10 +968,6 @@ impl App {
             const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
             match tokio::time::timeout(CONNECT_TIMEOUT, connect_async(url.as_str())).await {
                 Ok(Ok((ws_stream, _))) => {
-                    debug_log
-                        .lock()
-                        .unwrap()
-                        .push("RECONNECT: WebSocket connected".into());
                     let (write, mut read) = ws_stream.split();
                     {
                         let mut sink_guard = ws_sink.lock().await;
@@ -1023,17 +975,8 @@ impl App {
                     }
 
                     // Auto-relogin if credentials are available and non-empty
-                    debug_log.lock().unwrap().push(format!(
-                        "RECONNECT: checking credentials login={:?} password_len={:?}",
-                        login.as_deref(),
-                        password.as_ref().map(|p| p.len())
-                    ));
                     if let (Some(l), Some(p)) = (&login, &password) {
                         if !l.is_empty() && !p.is_empty() {
-                            debug_log
-                                .lock()
-                                .unwrap()
-                                .push(format!("RECONNECT: sending Login for '{}'", l));
                             let login_msg = chatter_protocol::ClientMessage::Login {
                                 login: l.clone(),
                                 passwd: p.clone(),
@@ -1046,7 +989,6 @@ impl App {
                                             true,
                                             false,
                                             current_room.clone(),
-                                            debug_log.lock().unwrap().clone(),
                                         );
                                     }
                                 };
@@ -1056,9 +998,6 @@ impl App {
                                 let mut sink_guard = ws_sink.lock().await;
                                 if let Some(ref mut sink) = *sink_guard {
                                     if sink.send(msg).await.is_ok() {
-                                        debug_log.lock().unwrap().push(
-                                            "RECONNECT: waiting for server response...".into(),
-                                        );
                                         // Wait for the server's response to verify login success.
                                         // Read the first message from the stream.
                                         use futures::StreamExt;
@@ -1069,10 +1008,6 @@ impl App {
                                         .await;
                                         match first_response {
                                             Ok(Some(Ok(response_msg))) => {
-                                                debug_log.lock().unwrap().push(
-                                                    "RECONNECT: received response from server"
-                                                        .into(),
-                                                );
                                                 // Check if the response is a success indicator.
                                                 // The server sends LoginOk followed by RoomList.
                                                 // We only need to verify the first message is a success.
@@ -1080,55 +1015,44 @@ impl App {
                                                 let is_success = match chatter_protocol::parse_server_message(response_msg) {
                                                     Ok(chatter_protocol::ServerMessage::LoginOk { .. })
                                                     | Ok(chatter_protocol::ServerMessage::AccountCreated { .. }) => true,
-                                                    Ok(_) | Err(_) => false,
-                                                };
-                                                debug_log.lock().unwrap().push(format!(
-                                                    "RECONNECT: login response parsed, is_success={}",
-                                                    is_success
-                                                ));
-                                                if is_success {
-                                                    debug_log.lock().unwrap().push("RECONNECT: LOGIN OK — returning (true, true)".into());
-                                                    // Store the remaining read stream for the main task.
+                                                Ok(_) | Err(_) => false,
+                                            };
+                                            if is_success {
                                                     // The RoomList (2nd message) will be handled by the event handler.
                                                     {
                                                         let mut read_guard =
-                                                            initial_read.lock().unwrap();
+                                                            initial_read.lock().expect("lock initial_read for reconnect");
                                                         *read_guard = Some(read);
                                                     }
                                                     return (
                                                         true,
                                                         true,
                                                         current_room.clone(),
-                                                        debug_log.lock().unwrap().clone(),
                                                     );
                                                 }
                                                 // LoginFailed or Error — login did not succeed.
-                                                debug_log.lock().unwrap().push("RECONNECT: LOGIN FAILED — returning (true, false)".into());
                                                 {
                                                     let mut read_guard =
-                                                        initial_read.lock().unwrap();
+                                                        initial_read.lock().expect("lock initial_read for reconnect");
                                                     *read_guard = Some(read);
                                                 }
                                                 return (
                                                     true,
                                                     false,
                                                     current_room.clone(),
-                                                    debug_log.lock().unwrap().clone(),
                                                 );
                                             }
                                             _ => {
                                                 // No response or parse error — login likely failed.
-                                                debug_log.lock().unwrap().push("RECONNECT: no response received — returning (true, false)".into());
                                                 {
                                                     let mut read_guard =
-                                                        initial_read.lock().unwrap();
+                                                        initial_read.lock().expect("lock initial_read for reconnect");
                                                     *read_guard = Some(read);
                                                 }
                                                 return (
                                                     true,
                                                     false,
                                                     current_room.clone(),
-                                                    debug_log.lock().unwrap().clone(),
                                                 );
                                             }
                                         }
@@ -1140,14 +1064,13 @@ impl App {
 
                     // Store the read stream for the main task.
                     {
-                        let mut read_guard = initial_read.lock().unwrap();
+                        let mut read_guard = initial_read.lock().expect("lock initial_read for reconnect");
                         *read_guard = Some(read);
                     }
                     return (
                         true,
                         false,
                         current_room.clone(),
-                        debug_log.lock().unwrap().clone(),
                     );
                 }
                 Ok(Err(_e)) => {
@@ -1539,7 +1462,6 @@ mod tests {
         let initial_read: Arc<std::sync::Mutex<Option<ReadType>>> =
             Arc::new(std::sync::Mutex::new(None));
 
-        let debug_log = Arc::new(std::sync::Mutex::new(Vec::new()));
         let result = App::reconnect_attempt(
             url.clone(),
             ws_sink.clone(),
@@ -1548,7 +1470,6 @@ mod tests {
             None,
             String::new(), // current_room
             true,          // skip_initial_delay for faster test
-            debug_log.clone(),
         )
         .await;
 
@@ -1610,13 +1531,12 @@ mod tests {
                 None,
                 String::new(),
                 true,
-                Arc::new(std::sync::Mutex::new(Vec::new())),
             ),
         )
         .await;
 
         let connected = match result {
-            Ok((connected, _, _, _)) => connected,
+            Ok((connected, _, _)) => connected,
             Err(_) => false, // timeout — reconnect didn't finish in time
         };
 
@@ -1679,7 +1599,6 @@ mod tests {
                 None,
                 String::new(),
                 true,
-                Arc::new(std::sync::Mutex::new(Vec::new())),
             ),
         )
         .await;
@@ -1716,7 +1635,6 @@ mod tests {
                 None,
                 String::new(),
                 false,
-                Arc::new(std::sync::Mutex::new(Vec::new())),
             ),
         )
         .await;
