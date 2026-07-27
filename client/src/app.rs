@@ -433,8 +433,8 @@ impl App {
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
-                self.messages
-                    .push(format!("[{}] [me] {}", format_timestamp(ts), msg));
+                let formatted = format!("[{}] [me] {}", format_timestamp(ts), msg);
+                self.messages.push(formatted.clone());
                 if let Err(e) = self
                     .send_client_message(chatter_protocol::ClientMessage::SendMessage {
                         room: self.room.clone(),
@@ -443,7 +443,11 @@ impl App {
                     .await
                 {
                     log::error!("Send error: {}", e);
+                    // Remove the locally-echoed message if send failed.
+                    self.messages.pop();
                 }
+                // Auto-scroll to bottom so the sent message is immediately visible.
+                self.message_offset = self.messages.len().saturating_sub(1);
                 self.input.clear();
                 self.character_index = 0;
             }
