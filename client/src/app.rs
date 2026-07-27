@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures_util::{SinkExt, StreamExt};
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Position},
+    layout::{Alignment, Constraint, Direction, Layout, Position},
     style::{Color, Modifier, Style},
     text::Line,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
@@ -41,7 +41,6 @@ pub struct App {
     >,
     login: String,
     room: String,
-    logged_in: bool,
     login_input: String,
     login_character_index: usize,
     password_input: String,
@@ -68,11 +67,8 @@ pub struct App {
     reconnect_tx: Option<tokio::sync::mpsc::UnboundedSender<AppEvent>>,
     /// Receiver for reconnect requests from the UI.
     reconnect_rx: tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
-    /// Whether a WebSocket connection is currently active.
-    connected: bool,
-    /// Whether the user was logged in before a disconnection
-    /// (used to auto-switch to login flow after reconnect).
-    was_logged_in: bool,
+    /// Unified connection/authentication state.
+    connection_state: ConnectionState,
 }
 
 /// Whether the user is logging in or creating an account.
@@ -90,6 +86,32 @@ enum InputMode {
     Normal,           // Main chat - browse mode
     Editing,          // Main chat - typing message
     RoomList,         // Room list focused (Tab to exit)
+    Disconnected,     // Server unreachable — wait for reconnect (only Esc/q to quit)
+}
+
+/// Unified connection and authentication state.
+/// Replaces separate `connected`, `logged_in`, `was_logged_in` booleans.
+#[derive(PartialEq, Clone)]
+enum ConnectionState {
+    /// WebSocket disconnected. `had_login` remembers if user was authenticated
+    /// before disconnect (for auto-relogin on reconnect).
+    Disconnected { had_login: bool },
+    /// WebSocket connected but not yet authenticated (waiting for LoginOk).
+    Connected,
+    /// Fully authenticated and joined a room.
+    LoggedIn { room: String },
+}
+
+impl ConnectionState {
+    fn is_connected(&self) -> bool {
+        !matches!(self, ConnectionState::Disconnected { .. })
+    }
+    fn is_logged_in(&self) -> bool {
+        matches!(self, ConnectionState::LoggedIn { .. })
+    }
+    fn is_disconnected(&self) -> bool {
+        matches!(self, ConnectionState::Disconnected { .. })
+    }
 }
 
 /// Format a Unix timestamp (u64, seconds since epoch) into a human-readable string.
@@ -175,7 +197,6 @@ impl App {
             ws_sink: write,
             login: default_user.clone().unwrap_or_default(),
             room: "general".to_string(),
-            logged_in: false,
             login_input: default_user.unwrap_or_default(),
             login_character_index: 0,
             password_input: String::new(),
@@ -189,8 +210,7 @@ impl App {
             reconnect_pending: false,
             reconnect_tx: Some(reconnect_tx),
             reconnect_rx,
-            connected: false,
-            was_logged_in: false,
+            connection_state: ConnectionState::Disconnected { had_login: false },
         })
     }
 
@@ -259,11 +279,23 @@ impl App {
         }
     }
 
+    // --- Disconnected state — only Esc/q to quit ---
+
+    fn handle_disconnected_keys(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.quit(),
+            KeyCode::Char('c' | 'C') if key.modifiers == KeyModifiers::CONTROL => self.quit(),
+            _ => {} // Ignore all other keys while disconnected
+        }
+    }
+
     // --- Entering login name (shared by both login and register) ---
 
     async fn handle_entering_login(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Enter if !self.login_input.is_empty() && self.connected => {
+            KeyCode::Enter
+                if !self.login_input.is_empty() && self.connection_state.is_connected() =>
+            {
                 self.login = self.login_input.clone();
                 self.messages.push(format!(
                     "[System] Entering password for '{}'...",
@@ -298,7 +330,9 @@ impl App {
 
     async fn handle_entering_password(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Enter if !self.password_input.is_empty() && self.connected => {
+            KeyCode::Enter
+                if !self.password_input.is_empty() && self.connection_state.is_connected() =>
+            {
                 let passwd = self.password_input.clone();
                 self.password_input.clear();
                 self.password_character_index = 0;
@@ -387,7 +421,7 @@ impl App {
 
     async fn handle_editing_keys(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Enter if !self.input.is_empty() => {
+            KeyCode::Enter if !self.input.is_empty() && self.connection_state.is_connected() => {
                 let msg = self.input.clone();
                 let ts = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -531,19 +565,18 @@ impl App {
                     }
                 } => {
                     // Capture whether we were logged in before reconnect logic modifies state.
-                    let had_login = self.was_logged_in;
+                    let had_login = matches!(self.connection_state, ConnectionState::LoggedIn { .. });
 
                     if let Some((connected, re_login_performed)) = result {
                         if connected {
                             // Reconnect succeeded — create a new connected event handler.
-                            self.connected = true;
+                            self.connection_state = ConnectionState::Connected;
                             self.reconnect_pending = false;
                             self.messages.push("[System] Reconnected.".to_string());
                             if re_login_performed {
                                 // Auto-relogin succeeded — go straight to room view.
-                                self.logged_in = true;
-                                // Preserve was_logged_in so next disconnect can also auto-relogin.
-                                self.was_logged_in = true;
+                                self.connection_state = ConnectionState::LoggedIn { room: "general".into() };
+                                self.input_mode = InputMode::Normal;
                                 // Restore room context. reset_room_on_disconnect() cleared
                                 // self.room, but the event handler won't receive LoginOk
                                 // (it was consumed by reconnect_attempt), so join_room()
@@ -558,11 +591,10 @@ impl App {
                                 }
                                 // Send JoinRoom so the server knows we re-joined after reconnect.
                                 self.join_room("general".to_string()).await;
-                            } else if self.was_logged_in {
+                            } else if had_login {
                                 // Re-authentication needed after disconnect — switch to
                                 // login flow with saved credentials.
-                                self.was_logged_in = false;
-                                self.logged_in = false;
+                                self.connection_state = ConnectionState::Connected;
                                 self.login_input = self.login.clone();
                                 self.login_character_index = self.login_input.chars().count();
                                 self.password_input.clear();
@@ -576,22 +608,15 @@ impl App {
                                     self.events = EventHandler::connected(read, self.ws_sink.clone()).await;
                                 }
                             } else {
+                                // Reconnect succeeded but no login was needed/attempted.
+                                // Go back to splash screen (user was never logged in).
+                                self.input_mode = InputMode::Splash;
                                 let initial_read = {
                                     let mut guard = self.initial_read.lock().unwrap();
                                     guard.take()
                                 };
                                 if let Some(read) = initial_read {
                                     self.events = EventHandler::connected(read, self.ws_sink.clone()).await;
-                                }
-                            }
-
-                            // Safety net: if we were logged in before reconnect, restore state.
-                            // This handles the case where reconnect_attempt returned (true, false)
-                            // but the user was actually logged in (credentials existed).
-                            if had_login {
-                                self.logged_in = true;
-                                if self.room.is_empty() {
-                                    self.room = "general".to_string();
                                 }
                             }
 
@@ -626,7 +651,7 @@ impl App {
                     connect_notify = None; // no longer needed
                     if connected {
                         // Initial connection succeeded — create a new connected event handler.
-                        self.connected = true;
+                        self.connection_state = ConnectionState::Connected;
                         self.reconnect_pending = false;
                         self.messages.push("[System] Connection established.".to_string());
                         let initial_read = {
@@ -638,6 +663,8 @@ impl App {
                         }
                     } else {
                         // Initial connection failed — push message and auto-retry with backoff.
+                        self.connection_state = ConnectionState::Disconnected { had_login: false };
+                        self.input_mode = InputMode::Disconnected;
                         self.messages.push("[System] Connection failed. Reconnecting...".to_string());
                         self.reconnect_pending = true;
                         // Spawn background reconnect task with exponential backoff.
@@ -690,13 +717,15 @@ impl App {
                                 self.handle_editing_keys(key).await
                             }
                             InputMode::Editing => {}
+                            InputMode::Disconnected => self.handle_disconnected_keys(key),
                         } },
                         Event::App(AppEvent::Quit) => self.quit(),
                         // Reconnect is handled via reconnect_rx, not events channel.
                         Event::App(AppEvent::Reconnect) => {},
                         Event::App(AppEvent::Disconnected { close_code, close_reason }) => {
-                            self.was_logged_in = self.logged_in;
-                            self.connected = false;
+                            let had_login = matches!(self.connection_state, ConnectionState::LoggedIn { .. });
+                            self.connection_state = ConnectionState::Disconnected { had_login };
+                            self.input_mode = InputMode::Disconnected;
                             if let (Some(code), Some(reason)) = (close_code, close_reason) {
                                 self.messages.push(format!("[System] Disconnected from server (close code: {code}, reason: {reason})."));
                             } else {
@@ -714,8 +743,9 @@ impl App {
                             }));
                         }
                         Event::App(AppEvent::ConnectionError { reason }) => {
-                            self.was_logged_in = self.logged_in;
-                            self.connected = false;
+                            let had_login = matches!(self.connection_state, ConnectionState::LoggedIn { .. });
+                            self.connection_state = ConnectionState::Disconnected { had_login };
+                            self.input_mode = InputMode::Disconnected;
                             self.reconnect_pending = true;
                             self.messages
                                 .push(format!("[System] Connection error: {}", reason));
@@ -733,14 +763,14 @@ impl App {
                             if let Ok(msg) = chatter_protocol::parse_server_message(data) {
                                 match msg {
                                     chatter_protocol::ServerMessage::LoginOk { login } => {
-                                        self.logged_in = true;
                                         self.login = login.clone();
+                                        self.connection_state = ConnectionState::LoggedIn { room: "general".into() };
                                         self.input_mode = InputMode::Normal;
                                         self.messages.push(format!("[System] Welcome, {}!", login));
                                         self.join_room("general".to_string()).await;
                                     }
                                     chatter_protocol::ServerMessage::LoginFailed { reason } => {
-                                        self.logged_in = false;
+                                        self.connection_state = ConnectionState::Connected;
                                         self.password_input.clear();
                                         self.password_character_index = 0;
                                         self.messages.push(format!("[System] {}", reason));
@@ -832,7 +862,7 @@ impl App {
                                             );
                                             // Reset all auth state even if the client believed
                                             // it was logged in — the server disagrees.
-                                            self.logged_in = false;
+                                            self.connection_state = ConnectionState::Connected;
                                             self.login = String::new();
                                             self.login_input.clear();
                                             self.login_character_index = 0;
@@ -842,7 +872,7 @@ impl App {
                                         }
                                         self.password_input.clear();
                                         self.password_character_index = 0;
-                                        if !self.logged_in {
+                                        if matches!(self.connection_state, ConnectionState::LoggedIn { .. }) {
                                             self.login_input.clear();
                                             self.login_character_index = 0;
                                             self.input_mode = InputMode::Splash;
@@ -1005,13 +1035,49 @@ impl App {
     // --- UI rendering ---
 
     pub fn view(&mut self, frame: &mut Frame) {
+        // --- Disconnected state: show dedicated screen ---
+        if matches!(self.input_mode, InputMode::Disconnected) {
+            let area = frame.area();
+            let disconnected_msg = Paragraph::new(Line::raw(
+                "⚠ Disconnected from server\nWaiting for reconnection...",
+            ))
+            .style(
+                Style::default()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .alignment(Alignment::Center);
+
+            let hint_msg = Paragraph::new(Line::raw(
+                "[Press q or Esc to quit]",
+            ))
+            .style(
+                Style::default()
+                    .fg(Color::DarkGray),
+            )
+            .alignment(Alignment::Center);
+
+            let v_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(40),
+                    Constraint::Length(3),
+                    Constraint::Length(1),
+                ])
+                .split(area);
+
+            frame.render_widget(disconnected_msg, v_layout[1]);
+            frame.render_widget(hint_msg, v_layout[2]);
+            return;
+        }
+
         let outer = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
             .split(frame.area());
 
         // Left: rooms (only visible when logged in)
-        if self.logged_in {
+        if self.connection_state.is_logged_in() {
             let room_items: Vec<ListItem> = self
                 .rooms
                 .iter()
@@ -1050,7 +1116,7 @@ impl App {
             .split(outer[1]);
 
         // Room header (only when logged in)
-        if self.logged_in {
+        if self.connection_state.is_logged_in() {
             let room_header = Paragraph::new(Line::raw(format!(
                 "# {} (q to quit, arrows to scroll)",
                 self.room
@@ -1081,7 +1147,7 @@ impl App {
             frame.render_widget(List::new(items), msg_area[1]);
         } else {
             // Show messages even when not logged in (system messages)
-            let msg_area = if !self.connected && self.reconnect_pending {
+            let msg_area = if !self.connection_state.is_connected() && self.reconnect_pending {
                 // Split into status line + messages when initial connect failed (auto-retrying)
                 let area = Layout::default()
                     .direction(Direction::Vertical)
@@ -1092,7 +1158,7 @@ impl App {
                     .block(Block::bordered().title("Messages"));
                 frame.render_widget(status, area[0]);
                 area[1]
-            } else if !self.connected {
+            } else if !self.connection_state.is_connected() {
                 // Split into status line + messages when disconnected after being connected
                 let area = Layout::default()
                     .direction(Direction::Vertical)
@@ -1147,6 +1213,7 @@ impl App {
             ),
             InputMode::Editing => (self.input.as_str(), "Message (Enter send, Esc back):"),
             InputMode::RoomList => ("", "Tab/Esc done, arrows navigate, Enter join"),
+            InputMode::Disconnected => ("", "Disconnected from server"),
         };
 
         frame.render_widget(
@@ -1157,6 +1224,7 @@ impl App {
                         Style::default().fg(Color::LightBlue)
                     }
                     InputMode::Splash => Style::default().fg(Color::Yellow),
+                    InputMode::Disconnected => Style::default().fg(Color::Red),
                 })
                 .block(Block::new().borders(Borders::ALL).title(title)),
             inner[1],
@@ -1185,6 +1253,7 @@ impl App {
             InputMode::Splash => {
                 frame.set_cursor_position(Position::new(inner[1].x + 1, inner[1].y + 1))
             }
+            InputMode::Disconnected => {}
         }
     }
 }
