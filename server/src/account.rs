@@ -210,7 +210,8 @@ impl Account {
         let accounts = stmt.query_map([], |row| row.get::<_, String>(0))?;
 
         for account in accounts {
-            println!("Found account: {}", account.unwrap());
+            let acc = account?;
+        println!("Found account: {}", acc);
         }
         Ok(())
     }

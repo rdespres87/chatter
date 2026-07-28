@@ -550,7 +550,7 @@ impl App {
         if let Some(_task) = self.connecting_task.take() {
             // Check without blocking: try to extract the read side.
             let initial_read = {
-                let mut guard = self.initial_read.lock().expect("lock initial_read");
+                let mut guard = self.initial_read.lock().map_err(|e| color_eyre::Report::msg(format!("initial_read lock poisoned: {e}")))?;
                 guard.take()
             };
             if let Some(read) = initial_read {
@@ -565,7 +565,7 @@ impl App {
         }
 
         // Reconnect task handle. Spawned when disconnected, completed when reconnected or failed.
-        let mut reconnect_task: Option<tokio::task::JoinHandle<(bool, bool, String)>> =
+        let mut reconnect_task: Option<tokio::task::JoinHandle<color_eyre::Result<(bool, bool, String)>>> =
             None;
         let mut connect_notify = self.connect_notify.take();
 
@@ -596,7 +596,7 @@ impl App {
                     // connection_state is Disconnected { had_login } at this point.
                     let had_login = matches!(self.connection_state, ConnectionState::Disconnected { had_login: true });
 
-                    if let Some((connected, re_login_performed, room)) = result {
+                    if let Some(Ok((connected, re_login_performed, room))) = result {
                         if connected {
                             // Reconnect succeeded — create a new connected event handler.
                             self.connection_state = ConnectionState::Connected;
@@ -612,7 +612,7 @@ impl App {
                                 // won't be called. We must explicitly rejoin here.
                                 self.room = room.clone();
                                 let initial_read = {
-                                    let mut guard = self.initial_read.lock().expect("lock initial_read");
+                                    let mut guard = self.initial_read.lock().map_err(|e| color_eyre::Report::msg(format!("initial_read lock poisoned: {e}")))?;
                                     guard.take()
                                 };
                                 if let Some(read) = initial_read {
@@ -630,7 +630,7 @@ impl App {
                                 self.password_character_index = 0;
                                 self.input_mode = InputMode::EnteringLogin;
                                 let initial_read = {
-                                    let mut guard = self.initial_read.lock().expect("lock initial_read");
+                                    let mut guard = self.initial_read.lock().map_err(|e| color_eyre::Report::msg(format!("initial_read lock poisoned: {e}")))?;
                                     guard.take()
                                 };
                                 if let Some(read) = initial_read {
@@ -641,7 +641,7 @@ impl App {
                                 // Go back to splash screen (user was never logged in).
                                 self.input_mode = InputMode::Splash;
                                 let initial_read = {
-                                    let mut guard = self.initial_read.lock().expect("lock initial_read");
+                                    let mut guard = self.initial_read.lock().map_err(|e| color_eyre::Report::msg(format!("initial_read lock poisoned: {e}")))?;
                                     guard.take()
                                 };
                                 if let Some(read) = initial_read {
@@ -651,7 +651,7 @@ impl App {
 
                             // Create event handler from initial_read if still available.
                             if let Some(initial_read) = {
-                                let mut guard = self.initial_read.lock().expect("lock initial_read");
+                                let mut guard = self.initial_read.lock().map_err(|e| color_eyre::Report::msg(format!("initial_read lock poisoned: {e}")))?;
                                 guard.take()
                             } {
                                 self.events = EventHandler::connected(initial_read, self.ws_sink.clone()).await;
@@ -661,7 +661,13 @@ impl App {
                             self.reconnect_pending = false;
                             self.input_mode = InputMode::Splash;
                         }
+                    } else if let Some(Err(e)) = result {
+                        // Reconnect task failed (e.g., mutex poisoned) — treat as disconnect.
+                        eprintln!("Reconnect task error: {e}");
+                        self.reconnect_pending = false;
+                        self.input_mode = InputMode::Splash;
                     }
+
                     reconnect_task = None;
                 }
 
@@ -684,7 +690,7 @@ impl App {
                         self.reconnect_pending = false;
                         self.messages.push("[System] Connection established.".to_string());
                         let initial_read = {
-                            let mut guard = self.initial_read.lock().expect("lock initial_read");
+                            let mut guard = self.initial_read.lock().map_err(|e| color_eyre::Report::msg(format!("initial_read lock poisoned: {e}")))?;
                             guard.take()
                         };
                         if let Some(read) = initial_read {
@@ -953,7 +959,7 @@ impl App {
         password: Option<String>,
         current_room: String,
         skip_initial_delay: bool,
-    ) -> (bool, bool, String) {
+    ) -> color_eyre::Result<(bool, bool, String)> {
         // (connected, re-login_performed, room)
         let mut retry_delay = std::time::Duration::from_secs(2);
         let max_delay = std::time::Duration::from_secs(60);
@@ -985,11 +991,11 @@ impl App {
                                 match chatter_protocol::serialize_client_message(&login_msg) {
                                     Ok(e) => e,
                                     Err(_) => {
-                                        return (
+                                        return Ok((
                                             true,
                                             false,
                                             current_room.clone(),
-                                        );
+                                        ));
                                     }
                                 };
                             let msg = Message::Text(encoded.into());
@@ -1021,39 +1027,39 @@ impl App {
                                                     // The RoomList (2nd message) will be handled by the event handler.
                                                     {
                                                         let mut read_guard =
-                                                            initial_read.lock().expect("lock initial_read for reconnect");
+                                                            initial_read.lock().map_err(|e| color_eyre::Report::msg(format!("initial_read lock poisoned: {e}")))?;
                                                         *read_guard = Some(read);
                                                     }
-                                                    return (
+                                                    return Ok((
                                                         true,
                                                         true,
                                                         current_room.clone(),
-                                                    );
+                                                    ));
                                                 }
                                                 // LoginFailed or Error — login did not succeed.
                                                 {
                                                     let mut read_guard =
-                                                        initial_read.lock().expect("lock initial_read for reconnect");
+                                                        initial_read.lock().map_err(|e| color_eyre::Report::msg(format!("initial_read lock poisoned: {e}")))?;
                                                     *read_guard = Some(read);
                                                 }
-                                                return (
+                                                return Ok((
                                                     true,
                                                     false,
                                                     current_room.clone(),
-                                                );
+                                                ));
                                             }
                                             _ => {
                                                 // No response or parse error — login likely failed.
                                                 {
                                                     let mut read_guard =
-                                                        initial_read.lock().expect("lock initial_read for reconnect");
+                                                        initial_read.lock().map_err(|e| color_eyre::Report::msg(format!("initial_read lock poisoned: {e}")))?;
                                                     *read_guard = Some(read);
                                                 }
-                                                return (
+                                                return Ok((
                                                     true,
                                                     false,
                                                     current_room.clone(),
-                                                );
+                                                ));
                                             }
                                         }
                                     }
@@ -1062,16 +1068,21 @@ impl App {
                         }
                     }
 
-                    // Store the read stream for the main task.
-                    {
-                        let mut read_guard = initial_read.lock().expect("lock initial_read for reconnect");
+                    // If no auto-relogin was attempted (no credentials), store the read stream.
+                    // Otherwise, we already stored it above in one of the auto-relogin branches.
+                    if login.is_none() || password.is_none() {
+                        let mut read_guard = initial_read.lock().map_err(|e| color_eyre::Report::msg(format!("initial_read lock poisoned: {e}")))?;
                         *read_guard = Some(read);
+                    } else {
+                        // Auto-relogin was attempted but didn't reach a success branch — connection is unusable.
+                        let mut read_guard = initial_read.lock().map_err(|e| color_eyre::Report::msg(format!("initial_read lock poisoned: {e}")))?;
+                        *read_guard = None;
                     }
-                    return (
+                    return Ok((
                         true,
                         false,
                         current_room.clone(),
-                    );
+                    ));
                 }
                 Ok(Err(_e)) => {
                     // Connection failed, will retry with backoff
@@ -1474,7 +1485,7 @@ mod tests {
         .await;
 
         assert!(
-            result.0,
+            result.unwrap().0,
             "reconnect_attempt should succeed when server is live"
         );
 
@@ -1536,8 +1547,8 @@ mod tests {
         .await;
 
         let connected = match result {
-            Ok((connected, _, _)) => connected,
-            Err(_) => false, // timeout — reconnect didn't finish in time
+            Ok(Ok((connected, _, _))) => connected,
+            Ok(Err(_)) | Err(_) => false, // task error or timeout — reconnect didn't finish in time
         };
 
         assert!(

@@ -486,8 +486,8 @@ pub(crate) fn broadcast_to_room(
         message: message.to_string(),
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64,
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
     };
     let json = chatter_protocol::serialize_server_message(&broadcast_msg)
         .context("Failed to serialize message")?;
