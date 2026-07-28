@@ -169,7 +169,10 @@ impl App {
                     Ok(Ok((ws_stream, _))) => {
                         let (sink, stream) = ws_stream.split();
                         *write_socket.lock().await = Some(sink);
-                        *initial_read.lock().expect("lock initial_read for initial connection") = Some(stream);
+                        match initial_read.lock() {
+                            Ok(mut guard) => *guard = Some(stream),
+                            Err(e) => log::warn!("initial_read lock poisoned during initial connection: {e}"),
+                        }
                         let _ = connect_tx.send(true);
                     }
                     Ok(Err(e)) => {
