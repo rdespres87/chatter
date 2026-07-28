@@ -297,12 +297,11 @@ async fn process_data(
                 return;
             }
 
-            broadcast_to_room(
+            broadcast_system_message(
                 &peer_map,
                 &addr,
-                &login,
                 &room,
-                &format!("[System] {} joined the room", login),
+                &format!("{} joined the room", login),
             )
             .ok();
 
@@ -332,12 +331,11 @@ async fn process_data(
                 return;
             }
 
-            broadcast_to_room(
+            broadcast_system_message(
                 &peer_map,
                 &addr,
-                &login,
                 &room,
-                &format!("[System] {} left the room", login),
+                &format!("{} left the room", login),
             )
             .ok();
         }
@@ -472,7 +470,49 @@ pub(crate) fn send_history(
     )
 }
 
-/// Broadcast a message to all peers in the same room except the sender.
+/// Broadcast a system message to all peers in the same room except the sender.
+/// Uses `login: "Server"` and `room: "system"` so the client renders it as a
+/// system notification (dark gray, `[HH:MM] [System] ...` format).
+pub(crate) fn broadcast_system_message(
+    peer_map: &PeerMap,
+    sender_addr: &SocketAddr,
+    room: &str,
+    message: &str,
+) -> ServerResult {
+    let broadcast_msg = chatter_protocol::ServerMessage::IncomingMessage {
+        login: "Server".to_string(),
+        room: "system".to_string(),
+        message: message.to_string(),
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+    };
+    let json = chatter_protocol::serialize_server_message(&broadcast_msg)
+        .context("Failed to serialize message")?;
+    let recipients: Vec<Tx> = {
+        let peers = peer_map
+            .read()
+            .map_err(|e| anyhow::anyhow!("RwLock poisoned: {}", e))?;
+        peers
+            .iter()
+            .filter_map(|(peer_addr, peer)| {
+                if peer_addr != sender_addr && peer.rooms.contains(room) {
+                    Some(peer.tx.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+
+    for tx in recipients {
+        let _ = tx.unbounded_send(Message::Text(json.clone().into()));
+    }
+    Ok(())
+}
+
+/// Broadcast a regular chat message to all peers in the same room except the sender.
 pub(crate) fn broadcast_to_room(
     peer_map: &PeerMap,
     sender_addr: &SocketAddr,
