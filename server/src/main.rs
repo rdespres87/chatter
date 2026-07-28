@@ -714,12 +714,11 @@ fn announce_room_departures(
     rooms: Vec<String>,
 ) {
     for room in rooms {
-        if let Err(error) = broadcast_to_room(
+        if let Err(error) = broadcast_system_message(
             peer_map,
             addr,
-            login,
             &room,
-            &format!("[System] {} left the room", login),
+            &format!("{} left the room", login),
         ) {
             warn!(
                 "Failed to announce room departure for '{}': {}",
@@ -864,12 +863,11 @@ async fn handle_connection(
         .remove(&addr);
     if let Some(peer) = disconnected_peer {
         for room in peer.rooms {
-            broadcast_to_room(
+            broadcast_system_message(
                 &peer_map,
                 &addr,
-                &peer.login,
                 &room,
-                &format!("[System] {} disconnected", peer.login),
+                &format!("{} disconnected", peer.login),
             )
             .ok();
         }
@@ -1224,9 +1222,9 @@ mod tests {
                 message,
                 ..
             } => {
-                assert_eq!(login, "old-login");
-                assert_eq!(room, "general");
-                assert_eq!(message, "[System] old-login left the room");
+                assert_eq!(login, "Server");
+                assert_eq!(room, "system");
+                assert_eq!(message, "old-login left the room");
             }
             other => panic!("Expected IncomingMessage, got {other:?}"),
         }
@@ -1283,9 +1281,9 @@ mod tests {
                 message,
                 ..
             } => {
-                assert_eq!(login, "alice");
-                assert_eq!(room, "general");
-                assert_eq!(message, "[System] alice left the room");
+                assert_eq!(login, "Server");
+                assert_eq!(room, "system");
+                assert_eq!(message, "alice left the room");
             }
             other => panic!("Expected IncomingMessage, got {other:?}"),
         }
