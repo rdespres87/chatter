@@ -4,7 +4,7 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Position},
     style::{Color, Modifier, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 use tokio::net::TcpStream;
@@ -31,7 +31,7 @@ pub struct App {
     input: String,
     character_index: usize,
     input_mode: InputMode,
-    messages: Vec<String>,
+    messages: Vec<MessageEntry>,
     message_offset: usize,
     /// Write handle to the WebSocket stream. Set after initial connection or reconnect.
     ws_sink: Arc<
@@ -125,6 +125,49 @@ pub fn format_timestamp(unix_ts: i64) -> String {
     }
 }
 
+/// Message type: regular chat or system notification.
+#[derive(Clone)]
+enum MessageType {
+    Chat,
+    System(String), // description displayed after "[System] "
+}
+
+/// A structured message entry stored in the local message buffer.
+#[derive(Clone)]
+struct MessageEntry {
+    sender: String,  // "me", login, or "System"
+    content: String, // chat text; unused for System (desc carries the text)
+    timestamp: i64,  // Unix seconds (0 for system messages, ignored at render)
+    is_own: bool,    // true if sent by the current user
+    msg_type: MessageType,
+}
+
+/// Render a `MessageEntry` into a styled TUI `Line`.
+/// Chat messages from the current user are bold cyan; others are gray.
+/// System messages are dark gray with "[System] " prefix.
+fn render_message(entry: &MessageEntry) -> Line<'_> {
+    let timestamp = if entry.timestamp == 0 {
+        String::new()
+    } else {
+        format!("[{}] ", format_timestamp(entry.timestamp))
+    };
+
+    let text = match &entry.msg_type {
+        MessageType::Chat => format!("{}{}: {}", timestamp, entry.sender, entry.content),
+        MessageType::System(desc) => format!("{}[System] {}", timestamp, desc),
+    };
+
+    let style = match (&entry.msg_type, entry.is_own) {
+        (MessageType::System(_), _) => Style::default().fg(Color::DarkGray),
+        (_, true) => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+        (_, false) => Style::default().fg(Color::Gray),
+    };
+
+    Line::from(Span::styled(text, style))
+}
+
 impl App {
     /// Creates a new App instance. The WebSocket connection is attempted
     /// in a background task — this method returns immediately.
@@ -171,7 +214,9 @@ impl App {
                         *write_socket.lock().await = Some(sink);
                         match initial_read.lock() {
                             Ok(mut guard) => *guard = Some(stream),
-                            Err(e) => log::warn!("initial_read lock poisoned during initial connection: {e}"),
+                            Err(e) => log::warn!(
+                                "initial_read lock poisoned during initial connection: {e}"
+                            ),
                         }
                         let _ = connect_tx.send(true);
                     }
@@ -300,10 +345,16 @@ impl App {
                 if !self.login_input.is_empty() && self.connection_state.is_connected() =>
             {
                 self.login = self.login_input.clone();
-                self.messages.push(format!(
-                    "[System] Entering password for '{}'...",
-                    self.login
-                ));
+                self.messages.push(MessageEntry {
+                    sender: "System".to_string(),
+                    content: String::new(),
+                    timestamp: 0,
+                    is_own: false,
+                    msg_type: MessageType::System(format!(
+                        "Entering password for '{}'",
+                        self.login
+                    )),
+                });
                 self.input_mode = InputMode::EnteringPassword;
             }
             KeyCode::Char(c) if key.kind == KeyEventKind::Press => {
@@ -344,8 +395,16 @@ impl App {
 
                 match self.auth_mode {
                     AuthMode::Login => {
-                        self.messages
-                            .push(format!("[System] Logging in as '{}'...", self.login));
+                        self.messages.push(MessageEntry {
+                            sender: "System".to_string(),
+                            content: String::new(),
+                            timestamp: 0,
+                            is_own: false,
+                            msg_type: MessageType::System(format!(
+                                "Logging in as '{}'",
+                                self.login
+                            )),
+                        });
                         if let Err(e) = self
                             .send_client_message(chatter_protocol::ClientMessage::Login {
                                 login: self.login.clone(),
@@ -354,14 +413,28 @@ impl App {
                             .await
                         {
                             log::error!("Login send error: {}", e);
-                            self.messages.push("[System] Login failed.".to_string());
+                            self.messages.push(MessageEntry {
+                                sender: "System".to_string(),
+                                content: String::new(),
+                                timestamp: 0,
+                                is_own: false,
+                                msg_type: MessageType::System("Login failed.".into()),
+                            });
                             self.reconnect_password = None;
                             self.input_mode = InputMode::Splash;
                         }
                     }
                     AuthMode::Register => {
-                        self.messages
-                            .push(format!("[System] Creating account '{}'...", self.login));
+                        self.messages.push(MessageEntry {
+                            sender: "System".to_string(),
+                            content: String::new(),
+                            timestamp: 0,
+                            is_own: false,
+                            msg_type: MessageType::System(format!(
+                                "Creating account '{}'",
+                                self.login
+                            )),
+                        });
                         if let Err(e) = self
                             .send_client_message(chatter_protocol::ClientMessage::CreateAccount {
                                 login: self.login.clone(),
@@ -370,8 +443,13 @@ impl App {
                             .await
                         {
                             log::error!("Register send error: {}", e);
-                            self.messages
-                                .push("[System] Registration failed.".to_string());
+                            self.messages.push(MessageEntry {
+                                sender: "System".to_string(),
+                                content: String::new(),
+                                timestamp: 0,
+                                is_own: false,
+                                msg_type: MessageType::System("Registration failed.".into()),
+                            });
                             self.input_mode = InputMode::Splash;
                         }
                     }
@@ -433,8 +511,13 @@ impl App {
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
-                let formatted = format!("[{}] me: {}", format_timestamp(ts), msg);
-                self.messages.push(formatted.clone());
+                self.messages.push(MessageEntry {
+                    sender: "me".to_string(),
+                    content: msg.clone(),
+                    timestamp: ts,
+                    is_own: true,
+                    msg_type: MessageType::Chat,
+                });
                 if let Err(e) = self
                     .send_client_message(chatter_protocol::ClientMessage::SendMessage {
                         room: self.room.clone(),
@@ -517,8 +600,13 @@ impl App {
             log::error!("Join room error: {}", e);
         }
 
-        self.messages
-            .push(format!("[System] Joined room '{}'", room));
+        self.messages.push(MessageEntry {
+            sender: "System".to_string(),
+            content: String::new(),
+            timestamp: 0,
+            is_own: false,
+            msg_type: MessageType::System(format!("Joined room '{}'", room)),
+        });
         self.input_mode = InputMode::Normal;
     }
 
@@ -553,7 +641,9 @@ impl App {
         if let Some(_task) = self.connecting_task.take() {
             // Check without blocking: try to extract the read side.
             let initial_read = {
-                let mut guard = self.initial_read.lock().map_err(|e| color_eyre::Report::msg(format!("initial_read lock poisoned: {e}")))?;
+                let mut guard = self.initial_read.lock().map_err(|e| {
+                    color_eyre::Report::msg(format!("initial_read lock poisoned: {e}"))
+                })?;
                 guard.take()
             };
             if let Some(read) = initial_read {
@@ -562,14 +652,20 @@ impl App {
             } else {
                 // Connection still in progress. Use the watch channel to detect completion.
                 // The task will send on connect_tx when it finishes (success or failure).
-                self.messages
-                    .push("[System] Connecting to server...".to_string());
+                self.messages.push(MessageEntry {
+                    sender: "System".to_string(),
+                    content: String::new(),
+                    timestamp: 0,
+                    is_own: false,
+                    msg_type: MessageType::System("Connecting to server...".into()),
+                });
             }
         }
 
         // Reconnect task handle. Spawned when disconnected, completed when reconnected or failed.
-        let mut reconnect_task: Option<tokio::task::JoinHandle<color_eyre::Result<(bool, bool, String)>>> =
-            None;
+        let mut reconnect_task: Option<
+            tokio::task::JoinHandle<color_eyre::Result<(bool, bool, String)>>,
+        > = None;
         let mut connect_notify = self.connect_notify.take();
 
         // Check if the initial connection already succeeded (watch channel may have
@@ -578,8 +674,13 @@ impl App {
             if *rx.borrow() {
                 // Initial connection already succeeded — update state immediately.
                 self.connection_state = ConnectionState::Connected;
-                self.messages
-                    .push("[System] Connection established.".to_string());
+                self.messages.push(MessageEntry {
+                    sender: "System".to_string(),
+                    content: String::new(),
+                    timestamp: 0,
+                    is_own: false,
+                    msg_type: MessageType::System("Connection established.".into()),
+                });
             }
         }
 
@@ -604,7 +705,13 @@ impl App {
                             // Reconnect succeeded — create a new connected event handler.
                             self.connection_state = ConnectionState::Connected;
                             self.reconnect_pending = false;
-                            self.messages.push("[System] Reconnected.".to_string());
+                            self.messages.push(MessageEntry {
+                                sender: "System".to_string(),
+                                content: String::new(),
+                                timestamp: 0,
+                                is_own: false,
+                                msg_type: MessageType::System("Reconnected.".into()),
+                            });
                             if re_login_performed {
                                 // Auto-relogin succeeded — go straight to room view.
                                 self.connection_state = ConnectionState::LoggedIn { room: room.clone() };
@@ -691,7 +798,13 @@ impl App {
                         // Initial connection succeeded — create a new connected event handler.
                         self.connection_state = ConnectionState::Connected;
                         self.reconnect_pending = false;
-                        self.messages.push("[System] Connection established.".to_string());
+                        self.messages.push(MessageEntry {
+                            sender: "System".to_string(),
+                            content: String::new(),
+                            timestamp: 0,
+                            is_own: false,
+                            msg_type: MessageType::System("Connection established.".into()),
+                        });
                         let initial_read = {
                             let mut guard = self.initial_read.lock().map_err(|e| color_eyre::Report::msg(format!("initial_read lock poisoned: {e}")))?;
                             guard.take()
@@ -703,7 +816,13 @@ impl App {
                         // Initial connection failed — push message and auto-retry with backoff.
                         self.connection_state = ConnectionState::Disconnected { had_login: false };
                         self.input_mode = InputMode::Disconnected;
-                        self.messages.push("[System] Connection failed. Reconnecting...".to_string());
+                        self.messages.push(MessageEntry {
+                            sender: "System".to_string(),
+                            content: String::new(),
+                            timestamp: 0,
+                            is_own: false,
+                            msg_type: MessageType::System("Connection failed. Reconnecting...".into()),
+                        });
                         self.reconnect_pending = true;
                         // Spawn background reconnect task with exponential backoff.
                         if reconnect_task.is_none() {
@@ -765,9 +884,21 @@ impl App {
                             self.connection_state = ConnectionState::Disconnected { had_login };
                             self.input_mode = InputMode::Disconnected;
                             if let (Some(code), Some(reason)) = (close_code, close_reason) {
-                                self.messages.push(format!("[System] Disconnected from server (close code: {code}, reason: {reason})."));
+                                self.messages.push(MessageEntry {
+                                    sender: "System".to_string(),
+                                    content: String::new(),
+                                    timestamp: 0,
+                                    is_own: false,
+                                    msg_type: MessageType::System(format!("Disconnected from server (close code: {code}, reason: {reason}).")),
+                                });
                             } else {
-                                self.messages.push("[System] Disconnected from server.".to_string());
+                                self.messages.push(MessageEntry {
+                                    sender: "System".to_string(),
+                                    content: String::new(),
+                                    timestamp: 0,
+                                    is_own: false,
+                                    msg_type: MessageType::System("Disconnected from server.".into()),
+                                });
                             }
                             // Save the current room before resetting it.
                             let previous_room = self.room.clone();
@@ -788,8 +919,13 @@ impl App {
                             self.connection_state = ConnectionState::Disconnected { had_login };
                             self.input_mode = InputMode::Disconnected;
                             self.reconnect_pending = true;
-                            self.messages
-                                .push(format!("[System] Connection error: {}", reason));
+                            self.messages.push(MessageEntry {
+                                sender: "System".to_string(),
+                                content: String::new(),
+                                timestamp: 0,
+                                is_own: false,
+                                msg_type: MessageType::System(format!("Connection error: {reason}")),
+                            });
                             // Spawn background reconnect task.
                             let url = self.url.clone();
                             let ws_sink = self.ws_sink.clone();
@@ -808,22 +944,37 @@ impl App {
                                         self.login = login.clone();
                                         self.connection_state = ConnectionState::LoggedIn { room: "general".into() };
                                         self.input_mode = InputMode::Normal;
-                                        self.messages.push(format!("[System] Welcome, {}!", login));
+                                        self.messages.push(MessageEntry {
+                                            sender: "System".to_string(),
+                                            content: String::new(),
+                                            timestamp: 0,
+                                            is_own: false,
+                                            msg_type: MessageType::System(format!("Welcome, {}!", login)),
+                                        });
                                         self.join_room("general".to_string()).await;
                                     }
                                     chatter_protocol::ServerMessage::LoginFailed { reason } => {
                                         self.connection_state = ConnectionState::Connected;
                                         self.password_input.clear();
                                         self.password_character_index = 0;
-                                        self.messages.push(format!("[System] {}", reason));
+                                        self.messages.push(MessageEntry {
+                                            sender: "System".to_string(),
+                                            content: String::new(),
+                                            timestamp: 0,
+                                            is_own: false,
+                                            msg_type: MessageType::System(reason),
+                                        });
                                         self.input_mode = InputMode::EnteringPassword;
                                     }
                                     chatter_protocol::ServerMessage::AccountCreated { login } => {
                                         self.auth_mode = AuthMode::Login;
-                                        self.messages.push(format!(
-                                            "[System] Account '{}' created. Please login.",
-                                            login
-                                        ));
+                                        self.messages.push(MessageEntry {
+                                            sender: "System".to_string(),
+                                            content: String::new(),
+                                            timestamp: 0,
+                                            is_own: false,
+                                            msg_type: MessageType::System(format!("Account '{}' created. Please login.", login)),
+                                        });
                                         self.login_input.clear();
                                         self.login_character_index = 0;
                                         self.password_input.clear();
@@ -833,7 +984,13 @@ impl App {
                                     chatter_protocol::ServerMessage::AccountCreationFailed { reason } => {
                                         self.password_input.clear();
                                         self.password_character_index = 0;
-                                        self.messages.push(format!("[System] {}", reason));
+                                        self.messages.push(MessageEntry {
+                                            sender: "System".to_string(),
+                                            content: String::new(),
+                                            timestamp: 0,
+                                            is_own: false,
+                                            msg_type: MessageType::System(reason),
+                                        });
                                         self.input_mode = InputMode::EnteringPassword;
                                     }
                                     chatter_protocol::ServerMessage::IncomingMessage {
@@ -843,18 +1000,21 @@ impl App {
                                         timestamp,
                                     } => {
                                         if login == "Server" && room == "system" {
-                                            self.messages.push(format!(
-                                                "[{}] [System] {}",
-                                                format_timestamp(timestamp),
-                                                message
-                                            ));
+                                            self.messages.push(MessageEntry {
+                                                sender: "System".to_string(),
+                                                content: String::new(),
+                                                timestamp,
+                                                is_own: false,
+                                                msg_type: MessageType::System(message),
+                                            });
                                         } else if room == self.room {
-                                            self.messages.push(format!(
-                                                "[{}] {}: {}",
-                                                format_timestamp(timestamp),
-                                                Self::resolve_sender(&self.login, &login),
-                                                message
-                                            ));
+                                            self.messages.push(MessageEntry {
+                                                sender: Self::resolve_sender(&self.login, &login),
+                                                content: message,
+                                                timestamp,
+                                                is_own: login == self.login,
+                                                msg_type: MessageType::Chat,
+                                            });
                                         }
                                         // Trim to MAX_HISTORY (keep most recent)
                                         if self.messages.len() > MAX_HISTORY {
@@ -879,13 +1039,12 @@ impl App {
                                         if hist_room == self.room {
                                             self.messages = history
                                                 .into_iter()
-                                                .map(|entry| {
-                                                    format!(
-                                                        "[{}] {}: {}",
-                                                        format_timestamp(entry.timestamp),
-                                                        Self::resolve_sender(&self.login, &entry.login),
-                                                        entry.message
-                                                    )
+                                                .map(|entry| MessageEntry {
+                                                    sender: Self::resolve_sender(&self.login, &entry.login),
+                                                    content: entry.message,
+                                                    timestamp: entry.timestamp,
+                                                    is_own: entry.login == self.login,
+                                                    msg_type: MessageType::Chat,
                                                 })
                                                 .collect();
                                             // Trim to MAX_HISTORY (keep most recent)
@@ -899,9 +1058,13 @@ impl App {
                                     }
                                     chatter_protocol::ServerMessage::Error { message, code } => {
                                         if is_not_authenticated_error(&code) {
-                                            self.messages.push(
-                                                "[System] Session expired. Please login again.".into(),
-                                            );
+                                            self.messages.push(MessageEntry {
+                                                sender: "System".to_string(),
+                                                content: String::new(),
+                                                timestamp: 0,
+                                                is_own: false,
+                                                msg_type: MessageType::System("Session expired. Please login again.".into()),
+                                            });
                                             // Reset all auth state even if the client believed
                                             // it was logged in — the server disagrees.
                                             self.connection_state = ConnectionState::Connected;
@@ -910,7 +1073,13 @@ impl App {
                                             self.login_character_index = 0;
                                             self.input_mode = InputMode::Splash;
                                         } else {
-                                            self.messages.push(format!("[System] [{}] {}", code, message));
+                                            self.messages.push(MessageEntry {
+                                                sender: "System".to_string(),
+                                                content: String::new(),
+                                                timestamp: 0,
+                                                is_own: false,
+                                                msg_type: MessageType::System(format!("[{code}] {message}")),
+                                            });
                                         }
                                         self.password_input.clear();
                                         self.password_character_index = 0;
@@ -994,11 +1163,7 @@ impl App {
                                 match chatter_protocol::serialize_client_message(&login_msg) {
                                     Ok(e) => e,
                                     Err(_) => {
-                                        return Ok((
-                                            true,
-                                            false,
-                                            current_room.clone(),
-                                        ));
+                                        return Ok((true, false, current_room.clone()));
                                     }
                                 };
                             let msg = Message::Text(encoded.into());
@@ -1026,43 +1191,39 @@ impl App {
                                                     | Ok(chatter_protocol::ServerMessage::AccountCreated { .. }) => true,
                                                 Ok(_) | Err(_) => false,
                                             };
-                                            if is_success {
+                                                if is_success {
                                                     // The RoomList (2nd message) will be handled by the event handler.
                                                     {
                                                         let mut read_guard =
                                                             initial_read.lock().map_err(|e| color_eyre::Report::msg(format!("initial_read lock poisoned: {e}")))?;
                                                         *read_guard = Some(read);
                                                     }
-                                                    return Ok((
-                                                        true,
-                                                        true,
-                                                        current_room.clone(),
-                                                    ));
+                                                    return Ok((true, true, current_room.clone()));
                                                 }
                                                 // LoginFailed or Error — login did not succeed.
                                                 {
                                                     let mut read_guard =
-                                                        initial_read.lock().map_err(|e| color_eyre::Report::msg(format!("initial_read lock poisoned: {e}")))?;
+                                                        initial_read.lock().map_err(|e| {
+                                                            color_eyre::Report::msg(format!(
+                                                                "initial_read lock poisoned: {e}"
+                                                            ))
+                                                        })?;
                                                     *read_guard = Some(read);
                                                 }
-                                                return Ok((
-                                                    true,
-                                                    false,
-                                                    current_room.clone(),
-                                                ));
+                                                return Ok((true, false, current_room.clone()));
                                             }
                                             _ => {
                                                 // No response or parse error — login likely failed.
                                                 {
                                                     let mut read_guard =
-                                                        initial_read.lock().map_err(|e| color_eyre::Report::msg(format!("initial_read lock poisoned: {e}")))?;
+                                                        initial_read.lock().map_err(|e| {
+                                                            color_eyre::Report::msg(format!(
+                                                                "initial_read lock poisoned: {e}"
+                                                            ))
+                                                        })?;
                                                     *read_guard = Some(read);
                                                 }
-                                                return Ok((
-                                                    true,
-                                                    false,
-                                                    current_room.clone(),
-                                                ));
+                                                return Ok((true, false, current_room.clone()));
                                             }
                                         }
                                     }
@@ -1074,18 +1235,18 @@ impl App {
                     // If no auto-relogin was attempted (no credentials), store the read stream.
                     // Otherwise, we already stored it above in one of the auto-relogin branches.
                     if login.is_none() || password.is_none() {
-                        let mut read_guard = initial_read.lock().map_err(|e| color_eyre::Report::msg(format!("initial_read lock poisoned: {e}")))?;
+                        let mut read_guard = initial_read.lock().map_err(|e| {
+                            color_eyre::Report::msg(format!("initial_read lock poisoned: {e}"))
+                        })?;
                         *read_guard = Some(read);
                     } else {
                         // Auto-relogin was attempted but didn't reach a success branch — connection is unusable.
-                        let mut read_guard = initial_read.lock().map_err(|e| color_eyre::Report::msg(format!("initial_read lock poisoned: {e}")))?;
+                        let mut read_guard = initial_read.lock().map_err(|e| {
+                            color_eyre::Report::msg(format!("initial_read lock poisoned: {e}"))
+                        })?;
                         *read_guard = None;
                     }
-                    return Ok((
-                        true,
-                        false,
-                        current_room.clone(),
-                    ));
+                    return Ok((true, false, current_room.clone()));
                 }
                 Ok(Err(_e)) => {
                     // Connection failed, will retry with backoff
@@ -1236,7 +1397,7 @@ impl App {
             let end = (start + visible).min(self.messages.len());
             let items: Vec<ListItem> = self.messages[start..end]
                 .iter()
-                .map(|m| ListItem::new(Line::raw(m.clone())))
+                .map(|m| ListItem::new(render_message(m)))
                 .collect();
             frame.render_widget(List::new(items), msg_area[1]);
         } else {
@@ -1276,7 +1437,7 @@ impl App {
             let end = (start + visible).min(self.messages.len());
             let items: Vec<ListItem> = self.messages[start..end]
                 .iter()
-                .map(|m| ListItem::new(Line::raw(m.clone())))
+                .map(|m| ListItem::new(render_message(m)))
                 .collect();
             frame.render_widget(List::new(items), msg_area);
         }
@@ -1537,15 +1698,7 @@ mod tests {
         // at 500ms; with skip_initial_delay=true the first attempt is at 4s.
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(15),
-            App::reconnect_attempt(
-                url,
-                ws_sink,
-                initial_read,
-                None,
-                None,
-                String::new(),
-                true,
-            ),
+            App::reconnect_attempt(url, ws_sink, initial_read, None, None, String::new(), true),
         )
         .await;
 
@@ -1605,15 +1758,7 @@ mod tests {
         let start = std::time::Instant::now();
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            App::reconnect_attempt(
-                url,
-                ws_sink,
-                initial_read,
-                None,
-                None,
-                String::new(),
-                true,
-            ),
+            App::reconnect_attempt(url, ws_sink, initial_read, None, None, String::new(), true),
         )
         .await;
         let elapsed = start.elapsed();
@@ -1641,15 +1786,7 @@ mod tests {
         let start = std::time::Instant::now();
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            App::reconnect_attempt(
-                url,
-                ws_sink,
-                initial_read,
-                None,
-                None,
-                String::new(),
-                false,
-            ),
+            App::reconnect_attempt(url, ws_sink, initial_read, None, None, String::new(), false),
         )
         .await;
         let elapsed = start.elapsed();
@@ -1685,5 +1822,81 @@ mod tests {
         assert_eq!(cursor_visual_x(text, 1), 2); // after 'é'
         assert_eq!(cursor_visual_x(text, 2), 4); // after '😀'
         assert_eq!(cursor_visual_x(text, 3), 5); // after 'a'
+    }
+
+    #[test]
+    fn render_message_chat_own() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let entry = MessageEntry {
+            sender: "me".to_string(),
+            content: "Hello!".to_string(),
+            timestamp: now,
+            is_own: true,
+            msg_type: MessageType::Chat,
+        };
+        let line = render_message(&entry);
+        let spans: Vec<String> = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(spans.len(), 1);
+        let text = &spans[0];
+        assert!(text.contains("me: Hello!"));
+    }
+
+    #[test]
+    fn render_message_chat_other() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let entry = MessageEntry {
+            sender: "Bob".to_string(),
+            content: "Hi there!".to_string(),
+            timestamp: now,
+            is_own: false,
+            msg_type: MessageType::Chat,
+        };
+        let line = render_message(&entry);
+        let spans: Vec<String> = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(spans.len(), 1);
+        let text = &spans[0];
+        assert!(text.contains("Bob: Hi there!"));
+    }
+
+    #[test]
+    fn render_message_system() {
+        let entry = MessageEntry {
+            sender: "System".to_string(),
+            content: String::new(),
+            timestamp: 0,
+            is_own: false,
+            msg_type: MessageType::System("Joined room 'general'".into()),
+        };
+        let line = render_message(&entry);
+        let spans: Vec<String> = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(spans.len(), 1);
+        let text = &spans[0];
+        assert!(text.contains("[System] Joined room 'general'"));
+    }
+
+    #[test]
+    fn render_message_system_with_timestamp() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let entry = MessageEntry {
+            sender: "System".to_string(),
+            content: String::new(),
+            timestamp: now,
+            is_own: false,
+            msg_type: MessageType::System("Session expired".into()),
+        };
+        let line = render_message(&entry);
+        let spans: Vec<String> = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(spans.len(), 1);
+        let text = &spans[0];
+        assert!(text.contains("[System] Session expired"));
     }
 }
