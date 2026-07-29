@@ -86,11 +86,12 @@ pub enum AppEvent {
     Reconnected,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum PendingAction {
     Login { login: String, password: String },
     Register { login: String, password: String },
     SendMessage { room: String, message: String },
+    LeaveRoom { room: String },
     JoinRoom { room: String },
 }
 
@@ -127,7 +128,7 @@ pub struct App {
     reconnect_pending: bool,
     events_tx: mpsc::UnboundedSender<AppEvent>,
     events_rx: mpsc::UnboundedReceiver<AppEvent>,
-    pending_action: Option<PendingAction>,
+    pending_actions: Vec<PendingAction>,
     action_tx: mpsc::UnboundedSender<ActionResult>,
     action_rx: mpsc::UnboundedReceiver<ActionResult>,
     connection_state: ConnectionState,
@@ -172,7 +173,7 @@ impl App {
             reconnect_pending: false,
             events_tx,
             events_rx,
-            pending_action: None,
+            pending_actions: Vec::new(),
             action_tx,
             action_rx,
             connection_state: ConnectionState::Connecting,
@@ -353,7 +354,7 @@ impl App {
                 self.input_mode = InputMode::Normal;
                 self.messages
                     .push(Self::system_message("Login successful.".into()));
-                self.join_room("general".into());
+                self.join_room(String::new(), "general".into());
             }
             ServerMessage::LoginFailed { reason } => {
                 self.connection_state = ConnectionState::Connected;
@@ -492,12 +493,16 @@ impl App {
             self.reconnect_pending = false;
         }
     }
-    fn join_room(&mut self, room: String) {
+    fn join_room(&mut self, old_room: String, room: String) {
+        if !old_room.is_empty() && old_room != room {
+            self.messages.clear();
+            self.pending_actions.push(PendingAction::LeaveRoom { room: old_room });
+        }
         self.room = room.clone();
         self.input_mode = InputMode::Normal;
         self.messages
             .push(Self::system_message(format!("Joined room '{room}'")));
-        self.queue_action(PendingAction::JoinRoom { room });
+        self.pending_actions.push(PendingAction::JoinRoom { room });
     }
     fn load_history(&self) {
         let room = self.room.clone();
@@ -512,7 +517,11 @@ impl App {
         });
     }
     fn reset_room_on_disconnect(&mut self) {
-        self.room.clear();
+        // If we were in a room, leave it before resetting (matches ratatui reconnect behavior).
+        let prev_room = std::mem::replace(&mut self.room, String::new());
+        if !prev_room.is_empty() {
+            self.pending_actions.push(PendingAction::LeaveRoom { room: prev_room });
+        }
         self.room_selected = 0;
     }
 
@@ -534,9 +543,7 @@ impl App {
     }
 
     fn queue_action(&mut self, action: PendingAction) {
-        if self.pending_action.is_none() {
-            self.pending_action = Some(action);
-        }
+        self.pending_actions.push(action);
     }
 
     fn submit_credentials(&mut self) {
@@ -582,9 +589,10 @@ impl App {
     }
 
     fn run_pending_action(&mut self) {
-        let Some(action) = self.pending_action.take() else {
+        let Some(action) = self.pending_actions.first().cloned() else {
             return;
         };
+        self.pending_actions.remove(0);
         let sink = self.ws_sink.clone();
         let result_tx = self.action_tx.clone();
         tokio::spawn(async move {
@@ -607,6 +615,7 @@ impl App {
                     (ClientMessage::SendMessage { room, message }, false)
                 }
                 PendingAction::JoinRoom { room } => (ClientMessage::JoinRoom { room }, true),
+                PendingAction::LeaveRoom { room } => (ClientMessage::LeaveRoom { room }, false),
             };
             let result = async {
                 let json = chatter_protocol::serialize_client_message(&message)
@@ -872,8 +881,9 @@ impl App {
                             ConnectionState::LoggedIn { .. }
                         );
                         if was_logged_in && room != &self.room {
+                            let old_room = self.room.clone();
                             self.room.clone_from(room);
-                            self.join_room(room.clone());
+                            self.join_room(old_room, room.clone());
                         } else {
                             self.room.clone_from(room);
                         }
