@@ -560,6 +560,19 @@ impl App {
         if message.is_empty() || self.room.is_empty() {
             return;
         }
+        // Local echo — server broadcast_to_room excludes the sender,
+        // so we must display our own messages client-side.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.messages.push(MessageEntry {
+            sender: resolve_sender(&self.login, &self.login),
+            content: message.clone(),
+            timestamp: now,
+            is_own: true,
+            msg_type: MessageType::Chat,
+        });
         self.input.clear();
         self.input_mode = InputMode::Normal;
         self.queue_action(PendingAction::SendMessage {
