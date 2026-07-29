@@ -995,16 +995,18 @@ impl App {
             });
 
         // ── Main chat area ───────────────────────────────────────────
-        egui::CentralPanel::default().show(ui, |ui| {
-            // Reserve space for the input bar at the bottom (approx 46px)
+        // After Panel::left + Panel::top, the remaining ui space IS the
+        // main chat area. No need for another panel — draw directly.
+        {
+            let available = ui.available_rect_before_wrap();
             let input_bar_height: f32 = 46.0;
-            let min_scrolled_height = ui.available_height() - input_bar_height - 4.0;
+            let chat_area_height = available.height() - input_bar_height - 4.0;
 
-            // Scrollable message area with constrained minimum height
+            // Scrollable message area — shrink to content, cap at chat_area_height
             egui::ScrollArea::vertical()
-                .auto_shrink([false; 2])
+                .auto_shrink([true; 2])
+                .max_height(chat_area_height)
                 .stick_to_bottom(true)
-                .min_scrolled_height(min_scrolled_height)
                 .show(ui, |ui| {
                     self.render_messages(ui);
                 });
@@ -1012,7 +1014,7 @@ impl App {
             // Input bar at bottom (outside scroll area)
             ui.add_space(4.0);
             self.render_input_bar(ui);
-        });
+        }
     }
     fn render_disconnected(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
