@@ -996,20 +996,22 @@ impl App {
 
         // ── Main chat area ───────────────────────────────────────────
         egui::CentralPanel::default().show(ui, |ui| {
-            // Vertical layout: messages take available space, input bar stays at bottom
-            ui.vertical(|ui| {
-                // Scrollable message area (takes all available space)
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false; 2])
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        self.render_messages(ui);
-                    });
+            // Reserve space for the input bar at the bottom (approx 46px)
+            let input_bar_height: f32 = 46.0;
+            let min_scrolled_height = ui.available_height() - input_bar_height - 4.0;
 
-                // Input bar at bottom (outside scroll area)
-                ui.add_space(4.0);
-                self.render_input_bar(ui);
-            });
+            // Scrollable message area with constrained minimum height
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .stick_to_bottom(true)
+                .min_scrolled_height(min_scrolled_height)
+                .show(ui, |ui| {
+                    self.render_messages(ui);
+                });
+
+            // Input bar at bottom (outside scroll area)
+            ui.add_space(4.0);
+            self.render_input_bar(ui);
         });
     }
     fn render_disconnected(&mut self, ui: &mut egui::Ui) {
@@ -1110,13 +1112,11 @@ impl App {
                                             let content_response = ui.scope(inner_ui);
                                             let content_size = content_response.response.rect.size();
                                             let bubble_size = content_size + egui::Vec2::new(bubble_padding * 2.0, bubble_padding * 2.0);
-                                            // Draw rounded rectangle background
-                                            let bubble_min = content_response.response.rect.min - egui::vec2(bubble_padding, bubble_padding);
-                                            ui.painter().rect_filled(
-                                                egui::Rect::from_min_size(bubble_min, bubble_size),
-                                                corner_radius,
-                                                bubble_color,
-                                            );
+                                            // Allocate painter space and draw background FIRST
+                                            let (resp, painter) = ui.allocate_painter(bubble_size, egui::Sense::hover());
+                                            painter.rect_filled(resp.rect, corner_radius, bubble_color);
+                                            // Render text content inside the bubble (draws on top)
+                                            inner_ui(ui);
                                         },
                                     );
                                 });
@@ -1126,13 +1126,11 @@ impl App {
                                     let content_response = ui.scope(inner_ui);
                                     let content_size = content_response.response.rect.size();
                                     let bubble_size = content_size + egui::Vec2::new(bubble_padding * 2.0, bubble_padding * 2.0);
-                                    // Draw rounded rectangle background
-                                    let bubble_min = content_response.response.rect.min - egui::vec2(bubble_padding, bubble_padding);
-                                    ui.painter().rect_filled(
-                                        egui::Rect::from_min_size(bubble_min, bubble_size),
-                                        corner_radius,
-                                        bubble_color,
-                                    );
+                                    // Allocate painter space and draw background FIRST
+                                    let (resp, painter) = ui.allocate_painter(bubble_size, egui::Sense::hover());
+                                    painter.rect_filled(resp.rect, corner_radius, bubble_color);
+                                    // Render text content inside the bubble (draws on top)
+                                    inner_ui(ui);
                                 });
                             }
                             ui.add_space(6.0);
