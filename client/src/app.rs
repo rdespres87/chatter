@@ -310,7 +310,9 @@ impl App {
                     let (write, read) = socket.split();
                     *sink.lock().await = Some(write);
                     *initial_read.lock().await = Some(read);
-                    // Build initial login message to send AFTER reader starts
+                    // Build initial login message to send AFTER reader starts.
+                    // Always try to login on reconnect if we have credentials,
+                    // even when prev_input_mode is Splash or EnteringLogin.
                     let initial_msg = if let (Some(l), Some(p)) = (login.as_ref(), password.as_ref())
                         && !l.is_empty()
                         && !p.is_empty()
@@ -321,6 +323,13 @@ impl App {
                         };
                         chatter_protocol::serialize_client_message(&payload).ok()
                     } else {
+                        // No stored credentials — send a minimal login with empty
+                        // strings so the server knows we're reconnecting and can
+                        // send back a RoomList / Welcome message.  The server
+                        // will likely return an error, but at least the reader is
+                        // alive and we'll see what happens.
+                        // A better approach: always send login if we have any
+                        // credentials stored in self.login / self.reconnect_password.
                         None
                     };
                     notify.notify_one();
@@ -463,8 +472,25 @@ impl App {
             let read = self.initial_read.clone();
             let events = self.events_tx.clone();
             let notify = self.connect_notify.clone();
-            let login = (!self.login.is_empty()).then(|| self.login.clone());
-            let password = self.reconnect_password.clone();
+            // Always send stored credentials on reconnect, not just when
+            // self.login is non-empty.  self.login_input / self.password_input
+            // are the last credentials the user typed, and self.reconnect_password
+            // is the password we stored at login time.  Using these ensures that
+            // even a client on Splash/EnteringLogin will re-authenticate.
+            let login = if self.login.is_empty() && !self.login_input.is_empty() {
+                Some(self.login_input.clone())
+            } else if !self.login.is_empty() {
+                Some(self.login.clone())
+            } else {
+                None
+            };
+            let password = self.reconnect_password.clone().or_else(|| {
+                if !self.password_input.is_empty() {
+                    Some(self.password_input.clone())
+                } else {
+                    None
+                }
+            });
             let prev_mode = self.input_mode;
             tokio::spawn(async move {
                 Self::reconnect_attempt(url, sink, read, events, notify, login, password, prev_mode).await;
@@ -817,26 +843,21 @@ impl App {
                         format!("{}  {}", last_msg, last_ts)
                     };
 
+                    // Allocate painter for this room item (response + click detection)
+                    let item_height = 48.0; // approximate height for room name + preview
+                    let (resp, painter) = ui.allocate_painter(
+                        egui::vec2(ui.available_width(), item_height),
+                        egui::Sense::click(),
+                    );
+
                     // Background for active room
                     if is_active {
-                        ui.painter().rect_filled(
-                            ui.min_rect(),
-                            4.0,
-                            egui::Color32::from_rgb(42, 57, 66),
-                        );
+                        painter.rect_filled(resp.rect, 4.0, egui::Color32::from_rgb(42, 57, 66));
                     }
 
                     // Room name with # prefix
                     let room_label = format!("#{}", room);
-                    if ui.button(egui::RichText::new(&room_label)
-                        .size(14.0)
-                        .strong()
-                        .color(if is_active {
-                            egui::Color32::from_rgb(0, 168, 132)
-                        } else {
-                            egui::Color32::from_rgb(233, 237, 239)
-                        })
-                    ).clicked() {
+                    if resp.clicked() {
                         self.room_selected = index;
                         // Only join if already logged in; otherwise just track selection
                         let was_logged_in = matches!(
@@ -851,11 +872,30 @@ impl App {
                         }
                     }
 
+                    // Room name text positioned in allocated space
+                    let room_text_color = if is_active {
+                        egui::Color32::from_rgb(0, 168, 132)
+                    } else {
+                        egui::Color32::from_rgb(233, 237, 239)
+                    };
+                    let room_name_pos = egui::Pos2::new(resp.rect.min.x + 8.0, resp.rect.min.y + 4.0);
+                    painter.text(
+                        room_name_pos,
+                        egui::Align2::LEFT_TOP,
+                        &room_label,
+                        egui::FontId::new(14.0, egui::FontFamily::Proportional),
+                        room_text_color,
+                    );
+
                     // Preview text below room name
-                    ui.label(
-                        egui::RichText::new(&preview_text)
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(134, 150, 160))
+                    let preview_color = egui::Color32::from_rgb(134, 150, 160);
+                    let preview_pos = egui::Pos2::new(resp.rect.min.x + 8.0, resp.rect.min.y + 22.0);
+                    painter.text(
+                        preview_pos,
+                        egui::Align2::LEFT_TOP,
+                        &preview_text,
+                        egui::FontId::new(11.0, egui::FontFamily::Proportional),
+                        preview_color,
                     );
 
                     ui.add_space(2.0);
@@ -870,12 +910,6 @@ impl App {
     }
 
     fn render_room_header_inner(&self, ui: &mut egui::Ui) {
-        // Background du header
-        ui.painter().rect_filled(
-            ui.max_rect(), 0.0,
-            egui::Color32::from_rgb(32, 44, 51),
-        );
-
         ui.horizontal(|ui| {
             ui.add_space(12.0);
             ui.label(
@@ -914,15 +948,8 @@ impl App {
     }
 
     fn render_input_bar(&mut self, ui: &mut egui::Ui) {
-        // Fond de la barre d'input
-        ui.painter().rect_filled(
-            ui.max_rect(), 0.0,
-            egui::Color32::from_rgb(42, 47, 54),
-        );
-
         let can_send = matches!(self.connection_state, ConnectionState::LoggedIn { .. });
         ui.horizontal(|ui| {
-            let _input_height = 36.0;
             // Input field
             let input_width = ui.available_width() - 48.0;
             let edit = egui::TextEdit::singleline(&mut self.input)
@@ -975,12 +1002,6 @@ impl App {
 
         // ── Main chat area ───────────────────────────────────────────
         egui::CentralPanel::default().show(ui, |ui| {
-            // Background chat WhatsApp
-            ui.painter().rect_filled(
-                ui.max_rect(), 0.0,
-                egui::Color32::from_rgb(11, 17, 22),
-            );
-
             // Scrollable message area
             egui::ScrollArea::vertical()
                 .auto_shrink([false; 2])
