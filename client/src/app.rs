@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use tokio::{
@@ -35,8 +35,6 @@ pub enum InputMode {
     EnteringLogin,
     EnteringPassword,
     Normal,
-    RoomList,
-    Editing,
     Disconnected,
 }
 
@@ -85,6 +83,9 @@ pub enum AppEvent {
     ConnectionError {
         reason: String,
     },
+    Reconnected {
+        prev_input_mode: InputMode,
+    },
 }
 
 #[derive(Debug)]
@@ -119,6 +120,10 @@ pub struct App {
     reconnect_password: Option<String>,
     rooms: Vec<String>,
     room_selected: usize,
+    /// Track the last message preview per room for sidebar display
+    room_last_message: HashMap<String, String>,
+    /// Track the last timestamp per room for sidebar display
+    room_last_timestamp: HashMap<String, i64>,
     auth_mode: AuthMode,
     connect_notify: Arc<Notify>,
     reconnect_pending: bool,
@@ -129,6 +134,7 @@ pub struct App {
     action_rx: mpsc::UnboundedReceiver<ActionResult>,
     connection_state: ConnectionState,
     theme_configured: bool,
+    sidebar_search: String,
 }
 
 impl App {
@@ -161,6 +167,8 @@ impl App {
             reconnect_password: None,
             rooms: default_rooms(),
             room_selected: 0,
+            room_last_message: HashMap::new(),
+            room_last_timestamp: HashMap::new(),
             auth_mode: AuthMode::Login,
             connect_notify,
             reconnect_pending: false,
@@ -171,6 +179,7 @@ impl App {
             action_rx,
             connection_state: ConnectionState::Connecting,
             theme_configured: false,
+            sidebar_search: String::new(),
         }
     }
 
@@ -188,7 +197,7 @@ impl App {
                     *sink.lock().await = Some(write);
                     *initial_read.lock().await = Some(read);
                     notify.notify_one();
-                    Self::start_reader_and_heartbeat(sink, initial_read, events).await;
+                    Self::start_reader_and_heartbeat(sink, initial_read, events, None).await;
                 }
                 Ok(Err(error)) => {
                     let _ = events.send(AppEvent::ConnectionError {
@@ -208,13 +217,21 @@ impl App {
         sink: SharedSink,
         initial_read: SharedRead,
         events: mpsc::UnboundedSender<AppEvent>,
+        initial_message: Option<String>,
     ) {
         let Some(mut read) = initial_read.lock().await.take() else {
             return;
         };
         let (pong_tx, mut pong_rx) = mpsc::unbounded_channel();
         let read_events = events.clone();
+        let sink_for_reader = sink.clone();
         tokio::spawn(async move {
+            // Send initial message if provided (ensures reader is listening first)
+            if let Some(msg) = initial_message {
+                if let Some(ws) = sink_for_reader.lock().await.as_mut() {
+                    let _ = ws.send(Message::Text(msg.into())).await;
+                }
+            }
             while let Some(result) = read.next().await {
                 match result {
                     Ok(Message::Text(data)) => {
@@ -284,6 +301,7 @@ impl App {
         notify: Arc<Notify>,
         login: Option<String>,
         password: Option<String>,
+        prev_input_mode: InputMode,
     ) {
         let mut delay = Duration::from_secs(2);
         loop {
@@ -292,22 +310,24 @@ impl App {
                     let (write, read) = socket.split();
                     *sink.lock().await = Some(write);
                     *initial_read.lock().await = Some(read);
-                    if let (Some(login), Some(passwd)) = (login.as_ref(), password.as_ref())
-                        && !login.is_empty()
-                        && !passwd.is_empty()
+                    // Build initial login message to send AFTER reader starts
+                    let initial_msg = if let (Some(l), Some(p)) = (login.as_ref(), password.as_ref())
+                        && !l.is_empty()
+                        && !p.is_empty()
                     {
                         let payload = ClientMessage::Login {
-                            login: login.clone(),
-                            passwd: passwd.clone(),
+                            login: l.clone(),
+                            passwd: p.clone(),
                         };
-                        if let Ok(json) = chatter_protocol::serialize_client_message(&payload)
-                            && let Some(ws) = sink.lock().await.as_mut()
-                        {
-                            let _ = ws.send(Message::Text(json.into())).await;
-                        }
-                    }
+                        chatter_protocol::serialize_client_message(&payload).ok()
+                    } else {
+                        None
+                    };
                     notify.notify_one();
-                    Self::start_reader_and_heartbeat(sink, initial_read, events).await;
+                    let _ = events.send(AppEvent::Reconnected {
+                        prev_input_mode: prev_input_mode,
+                    });
+                    Self::start_reader_and_heartbeat(sink, initial_read, events, initial_msg).await;
                     return;
                 }
                 Ok(Err(_)) | Err(_) => {
@@ -352,26 +372,27 @@ impl App {
                 self.messages.push(Self::system_message(reason));
             }
             ServerMessage::IncomingMessage {
-                login,
-                room,
-                message,
-                timestamp: _,
-            } if login == "Server" && room == "system" => {
-                self.messages.push(Self::system_message(message))
+                ref login,
+                ref room,
+                ref message,
+                timestamp,
+            } => {
+                // Track last message per room for sidebar preview
+                self.room_last_message.insert(room.clone(), message.clone());
+                self.room_last_timestamp.insert(room.clone(), timestamp);
+
+                if *login == "Server" && room == "system" {
+                    self.messages.push(Self::system_message(message.clone()));
+                } else if room == &self.room {
+                    self.messages.push(MessageEntry {
+                        sender: resolve_sender(&self.login, login),
+                        content: message.clone(),
+                        timestamp,
+                        is_own: login == &self.login,
+                        msg_type: MessageType::Chat,
+                    });
+                }
             }
-            ServerMessage::IncomingMessage {
-                login,
-                room,
-                message,
-                timestamp,
-            } if room == self.room => self.messages.push(MessageEntry {
-                sender: resolve_sender(&self.login, &login),
-                content: message,
-                timestamp,
-                is_own: login == self.login,
-                msg_type: MessageType::Chat,
-            }),
-            ServerMessage::IncomingMessage { .. } => {}
             ServerMessage::RoomList { rooms } => {
                 self.rooms = rooms;
                 self.room_selected = self.rooms.iter().position(|r| r == &self.room).unwrap_or(0);
@@ -387,8 +408,19 @@ impl App {
                         msg_type: MessageType::Chat,
                     })
                     .collect();
+                // Update last message tracking from history
+                if let Some(last) = self.messages.last() {
+                    self.room_last_message.insert(self.room.clone(), last.content.clone());
+                    self.room_last_timestamp.insert(self.room.clone(), last.timestamp);
+                }
             }
-            ServerMessage::RoomHistory { .. } => {}
+            ServerMessage::RoomHistory { room, messages } => {
+                // Update last message tracking for non-current rooms
+                if let Some(last) = messages.last() {
+                    self.room_last_message.insert(room.clone(), last.message.clone());
+                    self.room_last_timestamp.insert(room.clone(), last.timestamp);
+                }
+            }
             ServerMessage::Error { message, code } => {
                 if code.contains("NOT_AUTHENTICATED") {
                     self.connection_state = ConnectionState::Connected;
@@ -433,8 +465,9 @@ impl App {
             let notify = self.connect_notify.clone();
             let login = (!self.login.is_empty()).then(|| self.login.clone());
             let password = self.reconnect_password.clone();
+            let prev_mode = self.input_mode;
             tokio::spawn(async move {
-                Self::reconnect_attempt(url, sink, read, events, notify, login, password).await;
+                Self::reconnect_attempt(url, sink, read, events, notify, login, password, prev_mode).await;
             });
             self.reconnect_pending = false;
         }
@@ -462,15 +495,12 @@ impl App {
         self.room.clear();
         self.room_selected = 0;
     }
-    fn handle_focus(&self, ctx: &egui::Context) {
-        let id = match self.input_mode {
-            InputMode::EnteringLogin => Some(egui::Id::new("login")),
-            InputMode::EnteringPassword => Some(egui::Id::new("password")),
-            InputMode::Editing => Some(egui::Id::new("message")),
-            _ => None,
-        };
-        if let Some(id) = id {
-            ctx.memory_mut(|memory| memory.request_focus(id));
+
+    fn truncate_preview(s: &str, max_len: usize) -> String {
+        if s.len() <= max_len {
+            s.to_string()
+        } else {
+            format!("{}...", &s[..max_len])
         }
     }
     fn system_message(content: String) -> MessageEntry {
@@ -594,7 +624,7 @@ impl App {
                 ui.add_space(12.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.login_input)
-                        .id_source("login")
+                        .lock_focus(true)
                         .hint_text("Username")
                         .desired_width(260.0),
                 );
@@ -618,7 +648,7 @@ impl App {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.password_input)
                         .password(true)
-                        .id_source("password")
+                        .lock_focus(true)
                         .hint_text("Password")
                         .desired_width(260.0),
                 );
@@ -634,83 +664,352 @@ impl App {
             });
         });
     }
-    fn render_normal(&mut self, ui: &mut egui::Ui) {
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading(if self.room.is_empty() {
-                    "Chatter"
-                } else {
-                    &self.room
-                });
-                if ui.button("Room List").clicked() {
-                    self.input_mode = InputMode::RoomList;
-                }
-                if ui.button("Write message").clicked() {
-                    self.input_mode = InputMode::Editing;
-                }
-            });
-            ui.separator();
-            self.render_messages(ui);
+    fn render_sidebar_header(&mut self, ui: &mut egui::Ui) {
+        let avatar_size = 32.0;
+        // Allocate space for the avatar circle
+        let (_response, rect) = ui.allocate_exact_size(
+            egui::vec2(avatar_size, avatar_size),
+            egui::Sense::hover(),
+        );
+        // Paint green circle avatar centered in allocated space
+        let center = rect.rect.center();
+        ui.painter().circle_filled(
+            center,
+            avatar_size / 2.0,
+            egui::Color32::from_rgb(0, 168, 132),
+        );
+        // Draw first letter of login in the avatar
+        let letter = self.login.chars().next().map(|c| c.to_ascii_uppercase().to_string()).unwrap_or_else(|| "U".to_string());
+        let text_size = ui.fonts_mut(|f| f.layout_no_wrap(letter.clone(), egui::FontId::proportional(14.0), egui::Color32::WHITE));
+        let text_pos = egui::Pos2::new(
+            center.x - text_size.size().x / 2.0,
+            center.y - text_size.size().y / 2.0,
+        );
+        ui.painter().text(
+            text_pos,
+            egui::Align2::LEFT_TOP,
+            &letter,
+            egui::FontId::proportional(14.0),
+            egui::Color32::WHITE,
+        );
+
+        // Username next to avatar
+        ui.add_space(8.0);
+        let username_text = egui::RichText::new(&self.login)
+            .strong()
+            .size(14.0)
+            .color(egui::Color32::from_rgb(233, 237, 239));
+        // Make the username clickable to logout
+        let resp = ui.label(username_text);
+        if resp.clicked() {
+            self.input_mode = InputMode::Splash;
+            self.login.clear();
+            self.room.clear();
+            self.messages.clear();
+            self.messages.push(Self::system_message("Connecting to server...".into()));
+        }
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+            // Logout button
+            let logout_resp = ui.button(egui::RichText::new("⏻").size(12.0));
+            if logout_resp.clicked() {
+                self.input_mode = InputMode::Splash;
+                self.login.clear();
+                self.room.clear();
+                self.messages.clear();
+                self.messages.push(Self::system_message("Connecting to server...".into()));
+            }
         });
     }
+
+    fn render_search_bar(&mut self, ui: &mut egui::Ui) {
+        let search_bg = egui::Color32::from_rgb(42, 47, 54);
+        let search_height = 28.0;
+        let (_resp, rect) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), search_height),
+            egui::Sense::click(),
+        );
+        ui.painter().rect_filled(rect.rect, 6.0, search_bg);
+
+        // Search icon
+        let icon_x = rect.rect.min.x + 6.0;
+        let icon_y = rect.rect.center().y;
+        ui.painter().text(
+            egui::Pos2::new(icon_x, icon_y - 6.0),
+            egui::Align2::LEFT_TOP,
+            "🔍",
+            egui::FontId::proportional(12.0),
+            egui::Color32::from_rgb(134, 150, 160),
+        );
+
+        // Search text input - use horizontal layout with icon
+        let input_width = if !self.sidebar_search.is_empty() {
+            rect.rect.width() - 40.0
+        } else {
+            rect.rect.width() - 26.0
+        };
+        ui.horizontal(|ui| {
+            // Spacing to align with icon position
+            ui.add_space(18.0);
+            let edit = egui::TextEdit::singleline(&mut self.sidebar_search)
+                .hint_text("Search rooms...")
+                .text_color(egui::Color32::from_rgb(233, 237, 239))
+                .desired_width(input_width)
+                .frame(egui::Frame::NONE);
+            ui.add(edit);
+        });
+
+        // Clear button if search is not empty
+        if !self.sidebar_search.is_empty() {
+            let clear_btn = ui.button("✕");
+            if clear_btn.clicked() {
+                self.sidebar_search.clear();
+            }
+        }
+    }
+
     fn render_room_list(&mut self, ui: &mut egui::Ui) {
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("Rooms");
-                if ui.button("Back").clicked() {
-                    self.input_mode = InputMode::Normal;
-                }
-            });
-            ui.separator();
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for (index, room) in self.rooms.clone().into_iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(&mut self.room_selected, index, &room);
-                        if ui.button("Join").clicked() {
-                            self.join_room(room);
+        // Background sidebar WhatsApp
+        ui.painter().rect_filled(
+            ui.max_rect(), 0.0,
+            egui::Color32::from_rgb(32, 44, 51),
+        );
+
+        // Sidebar header (avatar + name + logout)
+        self.render_sidebar_header(ui);
+
+        ui.add_space(8.0);
+
+        // Search bar
+        self.render_search_bar(ui);
+
+        ui.add_space(4.0);
+
+        let search_lower = self.sidebar_search.to_lowercase();
+        let rooms_snapshot: Vec<String> = self.rooms.clone();
+        let mut filtered_count: usize = 0;
+
+        egui::ScrollArea::vertical()
+            .id_salt("room_scroll")
+            .show(ui, |ui| {
+                for (index, room) in rooms_snapshot.iter().enumerate() {
+                    // Search filter
+                    if !search_lower.is_empty()
+                        && !room.to_lowercase().contains(&search_lower)
+                    {
+                        continue;
+                    }
+                    filtered_count += 1;
+
+                    let is_active = room == &self.room;
+
+                    // Get last message preview for this room
+                    let last_msg = self.room_last_message.get(room)
+                        .map(|s| Self::truncate_preview(s, 40))
+                        .unwrap_or_else(|| "No messages".to_string());
+                    let last_ts = self.room_last_timestamp.get(room)
+                        .map(|t| format_timestamp(*t))
+                        .unwrap_or_else(|| "".to_string());
+
+                    let preview_text = if last_msg.len() >= 40 {
+                        format!("{} {}", last_msg, last_ts)
+                    } else {
+                        format!("{}  {}", last_msg, last_ts)
+                    };
+
+                    // Background for active room
+                    if is_active {
+                        ui.painter().rect_filled(
+                            ui.min_rect(),
+                            4.0,
+                            egui::Color32::from_rgb(42, 57, 66),
+                        );
+                    }
+
+                    // Room name with # prefix
+                    let room_label = format!("#{}", room);
+                    if ui.button(egui::RichText::new(&room_label)
+                        .size(14.0)
+                        .strong()
+                        .color(if is_active {
+                            egui::Color32::from_rgb(0, 168, 132)
+                        } else {
+                            egui::Color32::from_rgb(233, 237, 239)
+                        })
+                    ).clicked() {
+                        self.room_selected = index;
+                        // Only join if already logged in; otherwise just track selection
+                        let was_logged_in = matches!(
+                            self.connection_state,
+                            ConnectionState::LoggedIn { .. }
+                        );
+                        if was_logged_in && room != &self.room {
+                            self.room.clone_from(room);
+                            self.join_room(room.clone());
+                        } else {
+                            self.room.clone_from(room);
                         }
-                    });
+                    }
+
+                    // Preview text below room name
+                    ui.label(
+                        egui::RichText::new(&preview_text)
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(134, 150, 160))
+                    );
+
+                    ui.add_space(2.0);
+                }
+
+                // If no search results
+                if !search_lower.is_empty() && filtered_count == 0 {
+                    ui.label(egui::RichText::new("No rooms found")
+                        .size(12.0).color(egui::Color32::from_rgb(134, 150, 160)));
                 }
             });
+    }
+
+    fn render_room_header_inner(&self, ui: &mut egui::Ui) {
+        // Background du header
+        ui.painter().rect_filled(
+            ui.max_rect(), 0.0,
+            egui::Color32::from_rgb(32, 44, 51),
+        );
+
+        ui.horizontal(|ui| {
+            ui.add_space(12.0);
+            ui.label(
+                egui::RichText::new(format!("# {}", self.room))
+                    .size(16.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(233, 237, 239)),
+            );
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::TOP),
+                |ui| {
+                    let status_color = match &self.connection_state {
+                        ConnectionState::Connected
+                        | ConnectionState::LoggedIn { .. } => {
+                            egui::Color32::from_rgb(0, 168, 132)
+                        }
+                        ConnectionState::Connecting => egui::Color32::from_rgb(200, 180, 0),
+                        ConnectionState::Disconnected => egui::Color32::from_rgb(200, 60, 60),
+                    };
+                    let status_text = match &self.connection_state {
+                        ConnectionState::Connected => "Connected",
+                        ConnectionState::LoggedIn { login } => {
+                            Box::leak(format!("Connected as {}", login).into_boxed_str())
+                        }
+                        ConnectionState::Connecting => "Connecting...",
+                        ConnectionState::Disconnected => "Disconnected",
+                    };
+                    ui.label(
+                        egui::RichText::new(status_text)
+                            .size(12.0)
+                            .color(status_color),
+                    );
+                },
+            );
         });
     }
-    fn render_editing(&mut self, ui: &mut egui::Ui) {
+
+    fn render_input_bar(&mut self, ui: &mut egui::Ui) {
+        // Fond de la barre d'input
+        ui.painter().rect_filled(
+            ui.max_rect(), 0.0,
+            egui::Color32::from_rgb(42, 47, 54),
+        );
+
+        let can_send = matches!(self.connection_state, ConnectionState::LoggedIn { .. });
+        ui.horizontal(|ui| {
+            let _input_height = 36.0;
+            // Input field
+            let input_width = ui.available_width() - 48.0;
+            let edit = egui::TextEdit::singleline(&mut self.input)
+                .hint_text("Write a message...")
+                .text_color(egui::Color32::from_rgb(233, 237, 239))
+                .desired_width(input_width)
+                .frame(egui::Frame::NONE);
+            let response = ui.add(edit);
+
+            // Enter submits message when textedit loses focus and Enter is pressed
+            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                self.submit_message();
+            }
+
+            // Send button - green circle
+            let send_color = egui::Color32::from_rgb(0, 168, 132);
+            let send_btn = egui::Button::new(egui::RichText::new("➤").size(14.0))
+                .small()
+                .frame(false);
+            let send_response = ui.add(send_btn);
+            if can_send {
+                let btn_rect = send_response.rect;
+                ui.painter().circle_filled(
+                    btn_rect.center(),
+                    btn_rect.width() / 2.0,
+                    send_color,
+                );
+            }
+            if send_response.clicked() && can_send {
+                self.submit_message();
+            }
+        });
+    }
+
+    fn render_normal(&mut self, ui: &mut egui::Ui) {
+        // ── Left sidebar with room list ───────────────────────────────
+        egui::Panel::left("room_list")
+            .min_size(280.0)
+            .resizable(false)
+            .show(ui, |ui| {
+                self.render_room_list(ui);
+            });
+
+        // ── Chat header (fixed at top) ───────────────────────────────
+        egui::Panel::top("chat_header")
+            .exact_size(40.0)
+            .show(ui, |ui| {
+                self.render_room_header_inner(ui);
+            });
+
+        // ── Main chat area ───────────────────────────────────────────
         egui::CentralPanel::default().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading(if self.room.is_empty() {
-                    "Chatter"
-                } else {
-                    &self.room
-                });
-                if ui.button("Room List").clicked() {
-                    self.input_mode = InputMode::RoomList;
-                }
-            });
-            ui.separator();
-            self.render_messages(ui);
-            ui.separator();
-            ui.add_sized(
-                [ui.available_width(), 72.0],
-                egui::TextEdit::multiline(&mut self.input)
-                    .id_source("message")
-                    .hint_text("Write a message…"),
+            // Background chat WhatsApp
+            ui.painter().rect_filled(
+                ui.max_rect(), 0.0,
+                egui::Color32::from_rgb(11, 17, 22),
             );
-            ui.horizontal(|ui| {
-                if ui.button("Send").clicked() {
-                    self.submit_message();
-                }
-                if ui.button("Cancel").clicked() {
-                    self.input_mode = InputMode::Normal;
-                }
-            });
+
+            // Scrollable message area
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    self.render_messages(ui);
+                });
+
+            // Input bar at bottom (outside scroll area)
+            ui.add_space(4.0);
+            self.render_input_bar(ui);
         });
     }
     fn render_disconnected(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
             ui.vertical_centered(|ui| {
-                ui.add_space(ui.available_height() * 0.3);
-                ui.heading("Disconnected");
-                ui.label("The server connection was lost.");
+                ui.add_space(ui.available_height() * 0.25);
+                ui.heading(egui::RichText::new("Disconnected").color(egui::Color32::RED));
+                ui.add_space(8.0);
+                let status_text = match &self.connection_state {
+                    ConnectionState::Disconnected => {
+                        "The server connection was lost."
+                    }
+                    ConnectionState::Connecting => {
+                        "Reconnecting..."
+                    }
+                    _ => "The server connection was lost.",
+                };
+                ui.label(status_text);
                 if ui.button("Reconnect").clicked() {
                     self.reconnect_pending = true;
                     self.start_reconnect();
@@ -724,32 +1023,101 @@ impl App {
             .auto_shrink([false; 2])
             .stick_to_bottom(true)
             .show(ui, |ui| {
+                let bubble_padding = 8.0;
+                let corner_radius = 10.0;
+
                 for message in &self.messages {
                     match &message.msg_type {
                         MessageType::System(content) => {
-                            ui.label(
-                                egui::RichText::new(content)
-                                    .italics()
-                                    .color(egui::Color32::GRAY),
-                            );
-                        }
-                        MessageType::Chat => {
-                            let color = if message.is_own {
-                                egui::Color32::from_rgb(46, 204, 113)
-                            } else {
-                                egui::Color32::WHITE
-                            };
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(
-                                    egui::RichText::new(&message.sender).strong().color(color),
-                                );
-                                ui.label(egui::RichText::new(&message.content).color(color));
-                                ui.label(
-                                    egui::RichText::new(format_timestamp(message.timestamp))
-                                        .small()
-                                        .color(egui::Color32::GRAY),
+                            ui.horizontal(|ui| {
+                                ui.with_layout(
+                                    egui::Layout::top_down_justified(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            egui::RichText::new(content)
+                                                .italics()
+                                                .size(12.0)
+                                                .color(egui::Color32::GRAY),
+                                        );
+                                    },
                                 );
                             });
+                            ui.add_space(4.0);
+                        }
+                        MessageType::Chat => {
+                            let is_own = message.is_own;
+                            let bubble_color = if is_own {
+                                egui::Color32::from_rgb(46, 204, 113)
+                            } else {
+                                egui::Color32::from_rgb(50, 55, 62)
+                            };
+                            let text_color = if is_own {
+                                egui::Color32::WHITE
+                            } else {
+                                    egui::Color32::LIGHT_GRAY
+                            };
+                            let time_str = format_timestamp(message.timestamp);
+
+                            // Create the bubble content
+                            let inner_ui = |ui: &mut egui::Ui| {
+                                // Sender name
+                                ui.label(
+                                    egui::RichText::new(&message.sender)
+                                        .strong()
+                                        .size(13.0)
+                                        .color(text_color),
+                                );
+                                ui.add_space(2.0);
+                                // Message content
+                                ui.label(
+                                    egui::RichText::new(&message.content)
+                                        .size(14.0)
+                                        .color(text_color),
+                                );
+                                ui.add_space(2.0);
+                                // Timestamp
+                                ui.label(
+                                    egui::RichText::new(&time_str)
+                                        .size(10.0)
+                                        .color(text_color.gamma_multiply(0.6)),
+                                );
+                            };
+
+                            if is_own {
+                                // Right-aligned bubble (own messages)
+                                ui.horizontal(|ui| {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::TOP),
+                                        |ui| {
+                                            let content_response = ui.scope(inner_ui);
+                                            let content_size = content_response.response.rect.size();
+                                            let bubble_size = content_size + egui::Vec2::new(bubble_padding * 2.0, bubble_padding * 2.0);
+                                            // Draw rounded rectangle background
+                                            let bubble_min = content_response.response.rect.min - egui::vec2(bubble_padding, bubble_padding);
+                                            ui.painter().rect_filled(
+                                                egui::Rect::from_min_size(bubble_min, bubble_size),
+                                                corner_radius,
+                                                bubble_color,
+                                            );
+                                        },
+                                    );
+                                });
+                            } else {
+                                // Left-aligned bubble (other messages)
+                                ui.horizontal(|ui| {
+                                    let content_response = ui.scope(inner_ui);
+                                    let content_size = content_response.response.rect.size();
+                                    let bubble_size = content_size + egui::Vec2::new(bubble_padding * 2.0, bubble_padding * 2.0);
+                                    // Draw rounded rectangle background
+                                    let bubble_min = content_response.response.rect.min - egui::vec2(bubble_padding, bubble_padding);
+                                    ui.painter().rect_filled(
+                                        egui::Rect::from_min_size(bubble_min, bubble_size),
+                                        corner_radius,
+                                        bubble_color,
+                                    );
+                                });
+                            }
+                            ui.add_space(6.0);
                         }
                     }
                 }
@@ -770,7 +1138,7 @@ impl App {
                     self.password_input.clear();
                     self.input_mode = InputMode::Splash;
                 }
-                InputMode::Editing | InputMode::RoomList => self.input_mode = InputMode::Normal,
+                InputMode::Normal => self.input_mode = InputMode::Normal,
                 _ => {}
             }
             return;
@@ -779,8 +1147,14 @@ impl App {
             self.input_mode = match self.input_mode {
                 InputMode::EnteringLogin => InputMode::EnteringPassword,
                 InputMode::EnteringPassword => InputMode::EnteringLogin,
-                InputMode::Normal => InputMode::Editing,
-                InputMode::Editing => InputMode::Normal,
+                // In Normal/Editing, Tab cycles through rooms in sidebar
+                InputMode::Normal => {
+                    if !self.rooms.is_empty() {
+                        self.room_selected = (self.room_selected + 1) % self.rooms.len();
+                        self.room.clone_from(&self.rooms[self.room_selected]);
+                    }
+                    self.input_mode
+                }
                 mode => mode,
             };
             return;
@@ -791,8 +1165,8 @@ impl App {
         match self.input_mode {
             InputMode::EnteringLogin => self.input_mode = InputMode::EnteringPassword,
             InputMode::EnteringPassword => self.submit_credentials(),
-            InputMode::Normal => self.input_mode = InputMode::Editing,
-            InputMode::Editing => self.submit_message(),
+            // In Normal/Editing, Enter submits the message directly
+            InputMode::Normal => self.submit_message(),
             _ => {}
         }
     }
@@ -809,10 +1183,10 @@ impl App {
         let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
         style
             .text_styles
-            .insert(egui::TextStyle::Heading, egui::FontId::proportional(24.0));
+            .insert(egui::TextStyle::Heading, egui::FontId::proportional(20.0));
         style
             .text_styles
-            .insert(egui::TextStyle::Body, egui::FontId::proportional(16.0));
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
         ctx.set_style_of(egui::Theme::Dark, style);
         self.theme_configured = true;
     }
@@ -826,6 +1200,13 @@ impl App {
                     close_reason,
                 } => self.handle_disconnect(close_code, close_reason),
                 AppEvent::ConnectionError { reason } => self.handle_connection_error(reason),
+                AppEvent::Reconnected { prev_input_mode } => {
+                    // Restore the input mode that was active before disconnect.
+                    // If user was logged in (Normal), LoginOk from server will later
+                    // confirm Normal + join room. If user was on splash/login screen,
+                    // the previous mode is restored so they can continue where they left off.
+                    self.input_mode = prev_input_mode;
+                }
             }
         }
         if self.connection_state == ConnectionState::Connecting
@@ -860,15 +1241,12 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.configure_theme(&ctx);
-        self.handle_focus(&ctx);
         self.handle_keys(&ctx);
         match self.input_mode {
             InputMode::Splash => self.render_splash(ui),
             InputMode::EnteringLogin => self.render_entering_login(ui),
             InputMode::EnteringPassword => self.render_entering_password(ui),
             InputMode::Normal => self.render_normal(ui),
-            InputMode::RoomList => self.render_room_list(ui),
-            InputMode::Editing => self.render_editing(ui),
             InputMode::Disconnected => self.render_disconnected(ui),
         }
     }

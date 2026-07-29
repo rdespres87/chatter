@@ -211,7 +211,7 @@ impl Account {
 
         for account in accounts {
             let acc = account?;
-        println!("Found account: {}", acc);
+            println!("Found account: {}", acc);
         }
         Ok(())
     }

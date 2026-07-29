@@ -331,13 +331,8 @@ async fn process_data(
                 return;
             }
 
-            broadcast_system_message(
-                &peer_map,
-                &addr,
-                &room,
-                &format!("{} left the room", login),
-            )
-            .ok();
+            broadcast_system_message(&peer_map, &addr, &room, &format!("{} left the room", login))
+                .ok();
         }
         chatter_protocol::ClientMessage::SendMessage { room, message } => {
             let login = match authenticated_login(&peer_map, addr) {
@@ -714,12 +709,9 @@ fn announce_room_departures(
     rooms: Vec<String>,
 ) {
     for room in rooms {
-        if let Err(error) = broadcast_system_message(
-            peer_map,
-            addr,
-            &room,
-            &format!("{} left the room", login),
-        ) {
+        if let Err(error) =
+            broadcast_system_message(peer_map, addr, &room, &format!("{} left the room", login))
+        {
             warn!(
                 "Failed to announce room departure for '{}': {}",
                 login, error
@@ -909,11 +901,49 @@ async fn main() -> anyhow::Result<()> {
 
     let mut tasks = JoinSet::new();
 
-    // Spawn a background task that listens for Ctrl+C and signals shutdown via oneshot.
+    // Dual signal handling: tokio::signal (primary) + ctrlc (fallback for macOS).
+    // On macOS Apple Silicon, tokio::signal::ctrl_c() can fail to deliver SIGINT
+    // in certain terminal configurations. The ctrlc crate provides a fallback.
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    // Signal merging: both sources feed into an mpsc channel, then one task
+    // forwards to the oneshot shutdown.
+    let (signal_tx, mut signal_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+    // Primary: tokio signal handler
+    let signal_tx_primary = signal_tx.clone();
     tokio::spawn(async move {
         let _ = tokio::signal::ctrl_c().await;
+        let _ = signal_tx_primary.send(()).await;
+    });
+
+    // Fallback: ctrlc crate (handles SIGINT at the OS level)
+    let signal_tx_ctrlc = signal_tx.clone();
+    ctrlc::set_handler(move || {
+        let _ = signal_tx_ctrlc.blocking_send(());
+    })
+    .expect("Failed to set Ctrl+C handler");
+
+    // Merge both signal sources into one shutdown channel
+    let (merge_tx, mut merge_rx) = tokio::sync::mpsc::channel::<()>(1);
+    tokio::spawn(async move {
+        // Wait for first signal, then send shutdown
+        let _ = merge_rx.recv().await;
         let _ = shutdown_tx.send(());
+    });
+
+    // Both signal sources feed into merge channel
+    tokio::spawn(async move {
+        let mut buf = vec![];
+        loop {
+            buf.clear();
+            buf.reserve(2);
+            let n = signal_rx.recv_many(&mut buf, 2).await;
+            if n == 0 {
+                break;
+            }
+            let _ = merge_tx.send(()).await;
+        }
     });
 
     loop {
