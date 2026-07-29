@@ -1040,7 +1040,10 @@ impl App {
 
     fn render_bubble(
         ui: &mut egui::Ui,
-        inner_ui: impl Fn(&mut egui::Ui),
+        sender: &str,
+        content: &str,
+        time_str: &str,
+        text_color: egui::Color32,
         bubble_color: egui::Color32,
         corner_radius: f32,
         align_right: bool,
@@ -1050,45 +1053,72 @@ impl App {
         if align_right {
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                    Self::render_bubble_inner(ui, inner_ui, bubble_color, corner_radius, padding);
+                    Self::render_bubble_inner(ui, sender, content, time_str, text_color, bubble_color, corner_radius, padding);
                 });
             });
         } else {
             ui.horizontal(|ui| {
-                Self::render_bubble_inner(ui, inner_ui, bubble_color, corner_radius, padding);
+                Self::render_bubble_inner(ui, sender, content, time_str, text_color, bubble_color, corner_radius, padding);
             });
         }
     }
 
     fn render_bubble_inner(
         ui: &mut egui::Ui,
-        inner_ui: impl Fn(&mut egui::Ui),
+        sender: &str,
+        content: &str,
+        time_str: &str,
+        text_color: egui::Color32,
         bubble_color: egui::Color32,
         corner_radius: f32,
         padding: f32,
     ) {
-        // 1. Measure size WITHOUT rendering to screen (same available_width as rendering)
-        let max_rect = egui::Rect::from_min_size(
-            ui.cursor().min,
-            egui::vec2(ui.available_width(), f32::MAX),
-        );
-        let mut measure_ui = egui::Ui::new(
-            ui.ctx().clone(),
-            egui::Id::new("bubble_measure"),
-            egui::UiBuilder::new().max_rect(max_rect),
-        );
-        inner_ui(&mut measure_ui);
-        let content_size = measure_ui.min_rect().size();
+        // 1. Measure with painter.layout_no_wrap()
+        let sender_font = egui::FontId::new(10.0, egui::FontFamily::Proportional);
+        let content_font = egui::FontId::new(10.0, egui::FontFamily::Proportional);
+        let sender_text = format!("[{}] {}", sender, time_str);
+
+        let sender_galley = ui
+            .painter()
+            .layout_no_wrap(sender_text.clone(), sender_font.clone(), text_color.gamma_multiply(0.6));
+        let content_galley = ui
+            .painter()
+            .layout_no_wrap(content.to_string(), content_font.clone(), text_color);
+
+        let sender_size = sender_galley.size();
+        let content_size = content_galley.size();
+        let total_height = sender_size.y + content_size.y + 4.0; // gap between lines
+        let max_width = sender_size.x.max(content_size.x) + 4.0;
 
         // 2. Calculate bubble size
-        let bubble_size = content_size + egui::Vec2::splat(padding * 2.0);
+        let bubble_size = egui::Vec2::new(max_width + padding * 2.0, total_height + padding * 2.0);
 
-        // 3. Allocate space + draw background → text (correct z-ordering: background below)
+        // 3. Allocate space + draw background
         let (resp, painter) = ui.allocate_painter(bubble_size, egui::Sense::hover());
         painter.rect_filled(resp.rect, corner_radius, bubble_color);
-        ui.allocate_ui(content_size, |ui| {
-            inner_ui(ui);
-        });
+
+        // 4. Draw text inside the bubble
+        let text_origin = resp.rect.min + egui::vec2(padding, padding);
+
+        // Sender + time on first line
+        painter.text(
+            text_origin,
+            egui::Align2::LEFT_TOP,
+            sender_text.as_str(),
+            sender_font,
+            text_color.gamma_multiply(0.6),
+        );
+
+        // Content on second line
+        let content_y = text_origin.y + sender_size.y + 4.0;
+        let content_origin = egui::pos2(text_origin.x, content_y);
+        painter.text(
+            content_origin,
+            egui::Align2::LEFT_TOP,
+            content,
+            content_font,
+            text_color,
+        );
     }
 
     fn render_messages(&self, ui: &mut egui::Ui) {
@@ -1130,32 +1160,16 @@ impl App {
                             };
                             let time_str = format_timestamp(message.timestamp);
 
-                            // Create the bubble content
-                            let inner_ui = |ui: &mut egui::Ui| {
-                                // Sender name
-                                ui.label(
-                                    egui::RichText::new(&message.sender)
-                                        .strong()
-                                        .size(13.0)
-                                        .color(text_color),
-                                );
-                                ui.add_space(2.0);
-                                // Message content
-                                ui.label(
-                                    egui::RichText::new(&message.content)
-                                        .size(14.0)
-                                        .color(text_color),
-                                );
-                                ui.add_space(2.0);
-                                // Timestamp
-                                ui.label(
-                                    egui::RichText::new(&time_str)
-                                        .size(10.0)
-                                        .color(text_color.gamma_multiply(0.6)),
-                                );
-                            };
-
-                            Self::render_bubble(ui, inner_ui, bubble_color, corner_radius, is_own);
+                            Self::render_bubble(
+                                ui,
+                                &message.sender,
+                                &message.content,
+                                &time_str,
+                                text_color,
+                                bubble_color,
+                                corner_radius,
+                                is_own,
+                            );
                             ui.add_space(6.0);
                         }
                     }
