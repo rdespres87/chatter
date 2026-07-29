@@ -83,9 +83,7 @@ pub enum AppEvent {
     ConnectionError {
         reason: String,
     },
-    Reconnected {
-        prev_input_mode: InputMode,
-    },
+    Reconnected,
 }
 
 #[derive(Debug)]
@@ -301,7 +299,6 @@ impl App {
         notify: Arc<Notify>,
         login: Option<String>,
         password: Option<String>,
-        prev_input_mode: InputMode,
     ) {
         let mut delay = Duration::from_secs(2);
         loop {
@@ -333,9 +330,7 @@ impl App {
                         None
                     };
                     notify.notify_one();
-                    let _ = events.send(AppEvent::Reconnected {
-                        prev_input_mode: prev_input_mode,
-                    });
+                    let _ = events.send(AppEvent::Reconnected);
                     Self::start_reader_and_heartbeat(sink, initial_read, events, initial_msg).await;
                     return;
                 }
@@ -491,9 +486,8 @@ impl App {
                     None
                 }
             });
-            let prev_mode = self.input_mode;
             tokio::spawn(async move {
-                Self::reconnect_attempt(url, sink, read, events, notify, login, password, prev_mode).await;
+                Self::reconnect_attempt(url, sink, read, events, notify, login, password).await;
             });
             self.reconnect_pending = false;
         }
@@ -1002,17 +996,20 @@ impl App {
 
         // ── Main chat area ───────────────────────────────────────────
         egui::CentralPanel::default().show(ui, |ui| {
-            // Scrollable message area
-            egui::ScrollArea::vertical()
-                .auto_shrink([false; 2])
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    self.render_messages(ui);
-                });
+            // Vertical layout: messages take available space, input bar stays at bottom
+            ui.vertical(|ui| {
+                // Scrollable message area (takes all available space)
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        self.render_messages(ui);
+                    });
 
-            // Input bar at bottom (outside scroll area)
-            ui.add_space(4.0);
-            self.render_input_bar(ui);
+                // Input bar at bottom (outside scroll area)
+                ui.add_space(4.0);
+                self.render_input_bar(ui);
+            });
         });
     }
     fn render_disconnected(&mut self, ui: &mut egui::Ui) {
@@ -1221,12 +1218,15 @@ impl App {
                     close_reason,
                 } => self.handle_disconnect(close_code, close_reason),
                 AppEvent::ConnectionError { reason } => self.handle_connection_error(reason),
-                AppEvent::Reconnected { prev_input_mode } => {
-                    // Restore the input mode that was active before disconnect.
-                    // If user was logged in (Normal), LoginOk from server will later
-                    // confirm Normal + join room. If user was on splash/login screen,
-                    // the previous mode is restored so they can continue where they left off.
-                    self.input_mode = prev_input_mode;
+                AppEvent::Reconnected => {
+                    // If we were previously logged in, go to Normal mode so the
+                    // chat UI is shown.  If we were on Splash/EnteringLogin (no
+                    // stored login), go to Splash so the user can re-authenticate.
+                    if !self.login.is_empty() {
+                        self.input_mode = InputMode::Normal;
+                    } else {
+                        self.input_mode = InputMode::Splash;
+                    }
                 }
             }
         }
