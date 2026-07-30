@@ -1,6 +1,6 @@
 # Chatter
 
-WebSocket chat application with a ratatui TUI client, written in Rust.
+WebSocket chat application with an egui desktop client, written in Rust.
 
 ## Architecture
 
@@ -10,7 +10,7 @@ The project is organized as a Cargo workspace with three independent crates:
 chatter/
 ├── protocol/   # Shared message types and serialization
 ├── server/     # WebSocket server (tokio-tungstenite + SQLite)
-└── client/     # ratatui TUI chat client
+└── client/     # egui desktop chat client
 ```
 
 ### Protocol Crate (`protocol/`)
@@ -37,15 +37,14 @@ Listens on port `8080` by default.
 
 ### Client Crate (`client/`)
 
-Terminal UI chat client built with:
+Desktop chat client built with:
 
-- **ratatui** — Terminal rendering
-- **crossterm** — Terminal input/output handling
-- **tokio-tungstenite** — WebSocket client with auto-reconnect
-- Splash screen with Login/Register flow
-- Password input with character-by-character editing
-- Chat room interface with message history scrolling
-- Room list navigation (Tab to switch)
+|- **egui** + **eframe** — GPU-accelerated 2D GUI (OpenGL via wgpu)
+|- **tokio-tungstenite** — WebSocket client with auto-reconnect
+|- Splash screen with Login/Register flow
+|- Password input with character-by-character editing
+|- Chat room interface with message history scrolling
+|- Room list sidebar with left-click navigation
 
 ## Getting Started
 
