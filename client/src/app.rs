@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use chrono::{DateTime, NaiveDate, Utc};
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use tokio::{
     net::TcpStream,
@@ -11,7 +12,7 @@ use tokio_tungstenite::{
 
 use chatter_protocol::{ClientMessage, ServerMessage};
 
-use crate::utils::{format_timestamp, resolve_sender};
+use crate::utils::{format_date_separator, format_timestamp, format_timestamp_bubble, resolve_sender};
 
 const MAX_HISTORY: usize = 500;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -143,7 +144,6 @@ pub struct App {
     action_rx: mpsc::UnboundedReceiver<ActionResult>,
     connection_state: ConnectionState,
     theme_configured: bool,
-    sidebar_search: String,
 }
 
 impl App {
@@ -188,7 +188,6 @@ impl App {
             action_rx,
             connection_state: ConnectionState::Connecting,
             theme_configured: false,
-            sidebar_search: String::new(),
         }
     }
 
@@ -680,14 +679,13 @@ impl App {
                         .hint_text("Username")
                         .desired_width(260.0),
                 );
-                ui.horizontal(|ui| {
-                    if ui.button("Submit").clicked() {
-                        self.input_mode = InputMode::EnteringPassword;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.input_mode = InputMode::Splash;
-                    }
-                });
+                ui.add_space(12.0);
+                if ui.button("Submit").clicked() {
+                    self.input_mode = InputMode::EnteringPassword;
+                }
+                if ui.button("Cancel").clicked() {
+                    self.input_mode = InputMode::Splash;
+                }
             });
         });
     }
@@ -704,15 +702,14 @@ impl App {
                         .hint_text("Password")
                         .desired_width(260.0),
                 );
-                ui.horizontal(|ui| {
-                    if ui.button("Submit").clicked() {
-                        self.submit_credentials();
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.password_input.clear();
-                        self.input_mode = InputMode::Splash;
-                    }
-                });
+                ui.add_space(12.0);
+                if ui.button("Submit").clicked() {
+                    self.submit_credentials();
+                }
+                if ui.button("Cancel").clicked() {
+                    self.password_input.clear();
+                    self.input_mode = InputMode::Splash;
+                }
             });
         });
     }
@@ -774,52 +771,6 @@ impl App {
         });
     }
 
-    fn render_search_bar(&mut self, ui: &mut egui::Ui) {
-        let search_bg = egui::Color32::from_rgb(42, 47, 54);
-        let search_height = 28.0;
-        let (_resp, rect) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), search_height),
-            egui::Sense::click(),
-        );
-        ui.painter().rect_filled(rect.rect, 6.0, search_bg);
-
-        // Search icon
-        let icon_x = rect.rect.min.x + 6.0;
-        let icon_y = rect.rect.center().y;
-        ui.painter().text(
-            egui::Pos2::new(icon_x, icon_y - 6.0),
-            egui::Align2::LEFT_TOP,
-            "🔍",
-            egui::FontId::proportional(12.0),
-            egui::Color32::from_rgb(134, 150, 160),
-        );
-
-        // Search text input - use horizontal layout with icon
-        let input_width = if !self.sidebar_search.is_empty() {
-            rect.rect.width() - 40.0
-        } else {
-            rect.rect.width() - 26.0
-        };
-        ui.horizontal(|ui| {
-            // Spacing to align with icon position
-            ui.add_space(18.0);
-            let edit = egui::TextEdit::singleline(&mut self.sidebar_search)
-                .hint_text("Search rooms...")
-                .text_color(egui::Color32::from_rgb(233, 237, 239))
-                .desired_width(input_width)
-                .frame(egui::Frame::NONE);
-            ui.add(edit);
-        });
-
-        // Clear button if search is not empty
-        if !self.sidebar_search.is_empty() {
-            let clear_btn = ui.button("✕");
-            if clear_btn.clicked() {
-                self.sidebar_search.clear();
-            }
-        }
-    }
-
     fn render_room_list(&mut self, ui: &mut egui::Ui) {
         // Background sidebar WhatsApp
         ui.painter().rect_filled(
@@ -830,29 +781,12 @@ impl App {
         // Sidebar header (avatar + name + logout)
         self.render_sidebar_header(ui);
 
-        ui.add_space(8.0);
-
-        // Search bar
-        self.render_search_bar(ui);
-
-        ui.add_space(4.0);
-
-        let search_lower = self.sidebar_search.to_lowercase();
         let rooms_snapshot: Vec<String> = self.rooms.clone();
-        let mut filtered_count: usize = 0;
 
         egui::ScrollArea::vertical()
             .id_salt("room_scroll")
             .show(ui, |ui| {
                 for (index, room) in rooms_snapshot.iter().enumerate() {
-                    // Search filter
-                    if !search_lower.is_empty()
-                        && !room.to_lowercase().contains(&search_lower)
-                    {
-                        continue;
-                    }
-                    filtered_count += 1;
-
                     let is_active = room == &self.room;
 
                     // Get last message preview for this room
@@ -926,12 +860,6 @@ impl App {
                     );
 
                     ui.add_space(2.0);
-                }
-
-                // If no search results
-                if !search_lower.is_empty() && filtered_count == 0 {
-                    ui.label(egui::RichText::new("No rooms found")
-                        .size(12.0).color(egui::Color32::from_rgb(134, 150, 160)));
                 }
             });
     }
@@ -1082,18 +1010,19 @@ impl App {
         bubble_color: egui::Color32,
         corner_radius: f32,
         align_right: bool,
+        is_own: bool,
     ) {
         let padding = 8.0;
 
         if align_right {
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                    Self::render_bubble_inner(ui, sender, content, time_str, text_color, bubble_color, corner_radius, padding);
+                    Self::render_bubble_inner(ui, sender, content, time_str, text_color, bubble_color, corner_radius, padding, is_own);
                 });
             });
         } else {
             ui.horizontal(|ui| {
-                Self::render_bubble_inner(ui, sender, content, time_str, text_color, bubble_color, corner_radius, padding);
+                Self::render_bubble_inner(ui, sender, content, time_str, text_color, bubble_color, corner_radius, padding, is_own);
             });
         }
     }
@@ -1107,109 +1036,177 @@ impl App {
         bubble_color: egui::Color32,
         corner_radius: f32,
         padding: f32,
+        is_own: bool,
     ) {
-        // 1. Measure with painter.layout_no_wrap()
         let sender_font = egui::FontId::new(THEME_FONT_SENDER_SIZE, egui::FontFamily::Proportional);
         let content_font = egui::FontId::new(THEME_FONT_CONTENT_SIZE, egui::FontFamily::Proportional);
-        let sender_text = format!("[{}] {}", sender, time_str);
+        let timestamp_font = egui::FontId::new(10.0, egui::FontFamily::Proportional);
 
-        let sender_galley = ui
-            .painter()
-            .layout_no_wrap(sender_text.clone(), sender_font.clone(), text_color.gamma_multiply(0.6));
-        let content_galley = ui
-            .painter()
-            .layout_no_wrap(content.to_string(), content_font.clone(), text_color);
+        let sender_text = if is_own { String::new() } else { sender.to_string() };
 
+        // Sender: pas de wrapping (toujours une ligne)
+        let sender_galley = ui.painter().layout_no_wrap(
+            sender_text.clone(), sender_font.clone(), text_color.gamma_multiply(0.6));
         let sender_size = sender_galley.size();
+
+        // Content: measure WITH wrapping to get the actual height
+        let content_str = content.to_string();
+        let content_galley_no_wrap = ui.painter().layout_no_wrap(
+            content_str.clone(), content_font.clone(), text_color);
+        let content_unwrapped_width = content_galley_no_wrap.size().x;
+
+        // Timestamp: measure first (needed to calculate wrap_width)
+        let timestamp_galley = ui.painter().layout_no_wrap(
+            time_str.to_string(), timestamp_font.clone(), text_color.gamma_multiply(0.45));
+        let timestamp_width = timestamp_galley.size().x;
+
+        // Wrap width based on actual available space
+        let wrap_width = (ui.available_width() - 2.0 * padding - timestamp_width).max(50.0);
+        let content_galley = ui.painter().layout(
+            content_str.clone(), content_font.clone(), text_color, wrap_width);
         let content_size = content_galley.size();
-        let total_height = sender_size.y + content_size.y + 4.0; // gap between lines
-        let max_width = sender_size.x.max(content_size.x) + 4.0;
 
-        // 2. Calculate bubble size
-        let bubble_size = egui::Vec2::new(max_width + padding * 2.0, total_height + padding * 2.0);
+        // Hauteur: sender + contenu (avec wrapping) — only if sender is displayed
+        let sender_row_height = if is_own { 0.0 } else { sender_size.y + 4.0 };
+        let total_height = sender_row_height + content_size.y + padding * 2.0;
 
-        // 3. Allocate space + draw background
-        let (resp, painter) = ui.allocate_painter(bubble_size, egui::Sense::hover());
-        painter.rect_filled(resp.rect, corner_radius, bubble_color);
+        // Largeur: sender, ou (contenu non-wrap + timestamp + espacement)
+        let content_and_ts_width = content_unwrapped_width + 12.0 + timestamp_width;
+        let max_width = sender_size.x.max(content_and_ts_width) + 4.0;
 
-        // 4. Draw text inside the bubble
-        let text_origin = resp.rect.min + egui::vec2(padding, padding);
+        // Allouer l'espace + dessiner le fond
+        let bubble_size = egui::Vec2::new(max_width + padding * 2.0, total_height);
+        let (_resp, painter) = ui.allocate_painter(bubble_size, egui::Sense::hover());
+        painter.rect_filled(_resp.rect, corner_radius, bubble_color);
 
-        // Sender + time on first line
+        // Origine du texte
+        let text_origin = _resp.rect.min + egui::vec2(padding, padding);
+
+        // Sender (first line, only if not own message)
+        if !is_own {
+            painter.text(
+                text_origin, egui::Align2::LEFT_TOP,
+                sender_text.as_str(), sender_font, text_color.gamma_multiply(0.6));
+        }
+
+        // Content (second line, or first if own message)
+        let content_y = text_origin.y + sender_row_height;
         painter.text(
-            text_origin,
+            egui::pos2(text_origin.x, content_y),
             egui::Align2::LEFT_TOP,
-            sender_text.as_str(),
-            sender_font,
-            text_color.gamma_multiply(0.6),
-        );
+            &content_str, content_font, text_color);
 
-        // Content on second line
-        let content_y = text_origin.y + sender_size.y + 4.0;
-        let content_origin = egui::pos2(text_origin.x, content_y);
+        // Timestamp to the right of content, same line
+        let timestamp_x = text_origin.x + content_unwrapped_width + 12.0;
+        let timestamp_y = content_y;
         painter.text(
-            content_origin,
+            egui::pos2(timestamp_x, timestamp_y),
             egui::Align2::LEFT_TOP,
-            content,
-            content_font,
-            text_color,
-        );
+            time_str, timestamp_font, text_color.gamma_multiply(0.45));
     }
 
     fn render_messages(&self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical()
-            .auto_shrink([false; 2])
-            .stick_to_bottom(true)
-            .show(ui, |ui| {
-                let corner_radius = 10.0;
+        // ScrollArea is managed by render_normal(), not here.
+        let corner_radius = 10.0;
+        let mut last_date: Option<NaiveDate> = None;
 
-                for message in &self.messages {
-                    match &message.msg_type {
-                        MessageType::System(content) => {
-                            ui.horizontal(|ui| {
-                                ui.with_layout(
-                                    egui::Layout::top_down_justified(egui::Align::Center),
-                                    |ui| {
-                                        ui.label(
-                                            egui::RichText::new(content)
-                                                .italics()
-                                                .size(12.0)
-                                                .color(egui::Color32::GRAY),
-                                        );
-                                    },
+        for message in &self.messages {
+            match &message.msg_type {
+                MessageType::System(content) => {
+                    ui.horizontal(|ui| {
+                        ui.with_layout(
+                            egui::Layout::top_down_justified(egui::Align::Center),
+                            |ui| {
+                                ui.label(
+                                    egui::RichText::new(content)
+                                        .italics()
+                                        .size(12.0)
+                                        .color(egui::Color32::GRAY),
                                 );
-                            });
-                            ui.add_space(4.0);
-                        }
-                        MessageType::Chat => {
-                            let is_own = message.is_own;
-                            let bubble_color = if is_own {
-                                THEME_BUBBLE_OWN
-                            } else {
-                                THEME_BUBBLE_OTHER
-                            };
-                            let text_color = if is_own {
-                                THEME_TEXT_OWN
-                            } else {
-                                    THEME_TEXT_OTHER
-                            };
-                            let time_str = format_timestamp(message.timestamp);
-
-                            Self::render_bubble(
-                                ui,
-                                &message.sender,
-                                &message.content,
-                                &time_str,
-                                text_color,
-                                bubble_color,
-                                corner_radius,
-                                is_own,
-                            );
-                            ui.add_space(6.0);
-                        }
-                    }
+                            },
+                        );
+                    });
+                    ui.add_space(4.0);
                 }
-            });
+                MessageType::Chat => {
+                    // Check if we need a date separator
+                    let msg_date = DateTime::<Utc>::from_timestamp(message.timestamp, 0)
+                        .map_or_else(
+                            || NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
+                            |dt| dt.naive_utc().date(),
+                        );
+
+                    if let Some(last) = last_date {
+                        if msg_date != last {
+                            // Draw date separator
+                            let sep_label = format_date_separator(message.timestamp);
+
+                            // Allocate space for separator — dynamic height based on content
+                            let text_font = egui::FontId::new(11.0, egui::FontFamily::Proportional);
+                            let galley = ui.painter().layout_no_wrap(sep_label.clone(), text_font.clone(), egui::Color32::from_rgb(140, 150, 165));
+                            // Height: text + gap + line + padding top/bottom
+                            let sep_height = galley.size().y + 16.0; // 16px padding total (8 top + 8 bottom)
+
+                            let (resp, painter) = ui.allocate_painter(
+                                egui::vec2(ui.available_width(), sep_height),
+                                egui::Sense::hover(),
+                            );
+
+                            // Draw text above the line, centered horizontally
+                            let text_y = resp.rect.center().y - 4.0; // slightly above center
+                            painter.text(
+                                egui::pos2(resp.rect.center().x, text_y),
+                                egui::Align2::CENTER_CENTER,
+                                &sep_label,
+                                text_font,
+                                egui::Color32::from_rgb(140, 150, 165),
+                            );
+
+                            // Draw horizontal line below the text
+                            let line_y = text_y + galley.size().y / 2.0 + 4.0;
+                            painter.hline(
+                                (resp.rect.left() + 16.0)..=(resp.rect.right() - 16.0),
+                                line_y,
+                                (1.0, egui::Color32::from_rgb(60, 65, 75)),
+                            );
+
+                            last_date = Some(msg_date);
+
+                            // Spacing after separator to separate from first message
+                            ui.add_space(8.0);
+                        }
+                    } else {
+                        last_date = Some(msg_date);
+                    }
+
+                    let is_own = message.is_own;
+                    let bubble_color = if is_own {
+                        THEME_BUBBLE_OWN
+                    } else {
+                        THEME_BUBBLE_OTHER
+                    };
+                    let text_color = if is_own {
+                        THEME_TEXT_OWN
+                    } else {
+                            THEME_TEXT_OTHER
+                    };
+                    let time_str = format_timestamp_bubble(message.timestamp);
+
+                    Self::render_bubble(
+                        ui,
+                        &message.sender,
+                        &message.content,
+                        &time_str,
+                        text_color,
+                        bubble_color,
+                        corner_radius,
+                        is_own,
+                        is_own,
+                    );
+                    ui.add_space(6.0);
+                }
+            }
+        }
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
