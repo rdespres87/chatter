@@ -18,6 +18,16 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 
+// ── Theme constants (Ocean Night) ──────────────────────────────────────
+const THEME_PANEL_FILL: egui::Color32 = egui::Color32::from_rgb(15, 17, 24);
+const THEME_BUBBLE_OWN: egui::Color32 = egui::Color32::from_rgb(67, 148, 239);
+const THEME_BUBBLE_OTHER: egui::Color32 = egui::Color32::from_rgb(30, 33, 48);
+const THEME_TEXT_OWN: egui::Color32 = egui::Color32::WHITE;
+const THEME_TEXT_OTHER: egui::Color32 = egui::Color32::from_rgb(203, 214, 227);
+const THEME_ACCENT: egui::Color32 = egui::Color32::from_rgb(67, 148, 239);
+const THEME_FONT_SENDER_SIZE: f32 = 12.0;
+const THEME_FONT_CONTENT_SIZE: f32 = 14.0;
+
 type WsSink = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 type SharedSink = Arc<Mutex<Option<WsSink>>>;
 type WsRead = futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
@@ -1099,8 +1109,8 @@ impl App {
         padding: f32,
     ) {
         // 1. Measure with painter.layout_no_wrap()
-        let sender_font = egui::FontId::new(12.0, egui::FontFamily::Proportional);
-        let content_font = egui::FontId::new(14.0, egui::FontFamily::Proportional);
+        let sender_font = egui::FontId::new(THEME_FONT_SENDER_SIZE, egui::FontFamily::Proportional);
+        let content_font = egui::FontId::new(THEME_FONT_CONTENT_SIZE, egui::FontFamily::Proportional);
         let sender_text = format!("[{}] {}", sender, time_str);
 
         let sender_galley = ui
@@ -1174,14 +1184,14 @@ impl App {
                         MessageType::Chat => {
                             let is_own = message.is_own;
                             let bubble_color = if is_own {
-                                egui::Color32::from_rgb(67, 148, 239)
+                                THEME_BUBBLE_OWN
                             } else {
-                                egui::Color32::from_rgb(30, 33, 48)
+                                THEME_BUBBLE_OTHER
                             };
                             let text_color = if is_own {
-                                egui::Color32::WHITE
+                                THEME_TEXT_OWN
                             } else {
-                                    egui::Color32::from_rgb(203, 214, 227)
+                                    THEME_TEXT_OTHER
                             };
                             let time_str = format_timestamp(message.timestamp);
 
@@ -1254,9 +1264,9 @@ impl App {
             return;
         }
         let mut visuals = egui::Visuals::dark();
-        visuals.selection.bg_fill = egui::Color32::from_rgb(67, 148, 239);
-        visuals.hyperlink_color = egui::Color32::from_rgb(67, 148, 239);
-        visuals.panel_fill = egui::Color32::from_rgb(15, 17, 24);
+        visuals.selection.bg_fill = THEME_ACCENT;
+        visuals.hyperlink_color = THEME_ACCENT;
+        visuals.panel_fill = THEME_PANEL_FILL;
         ctx.set_visuals(visuals);
         let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
         style
