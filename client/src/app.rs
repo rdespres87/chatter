@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use chrono::{DateTime, NaiveDate, Utc};
 use futures_util::{FutureExt, SinkExt, StreamExt};
@@ -12,7 +12,7 @@ use tokio_tungstenite::{
 
 use chatter_protocol::{ClientMessage, ServerMessage};
 
-use crate::utils::{format_date_separator, format_timestamp, format_timestamp_bubble, resolve_sender};
+use crate::utils::{format_date_separator, format_timestamp_bubble, resolve_sender};
 
 const MAX_HISTORY: usize = 500;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -130,10 +130,6 @@ pub struct App {
     reconnect_password: Option<String>,
     rooms: Vec<String>,
     room_selected: usize,
-    /// Track the last message preview per room for sidebar display
-    room_last_message: HashMap<String, String>,
-    /// Track the last timestamp per room for sidebar display
-    room_last_timestamp: HashMap<String, i64>,
     auth_mode: AuthMode,
     connect_notify: Arc<Notify>,
     reconnect_pending: bool,
@@ -176,8 +172,6 @@ impl App {
             reconnect_password: None,
             rooms: default_rooms(),
             room_selected: 0,
-            room_last_message: HashMap::new(),
-            room_last_timestamp: HashMap::new(),
             auth_mode: AuthMode::Login,
             connect_notify,
             reconnect_pending: false,
@@ -391,10 +385,6 @@ impl App {
                 ref message,
                 timestamp,
             } => {
-                // Track last message per room for sidebar preview
-                self.room_last_message.insert(room.clone(), message.clone());
-                self.room_last_timestamp.insert(room.clone(), timestamp);
-
                 if *login == "Server" && room == "system" {
                     self.messages.push(Self::system_message(message.clone()));
                 } else if room == &self.room {
@@ -422,19 +412,8 @@ impl App {
                         msg_type: MessageType::Chat,
                     })
                     .collect();
-                // Update last message tracking from history
-                if let Some(last) = self.messages.last() {
-                    self.room_last_message.insert(self.room.clone(), last.content.clone());
-                    self.room_last_timestamp.insert(self.room.clone(), last.timestamp);
-                }
             }
-            ServerMessage::RoomHistory { room, messages } => {
-                // Update last message tracking for non-current rooms
-                if let Some(last) = messages.last() {
-                    self.room_last_message.insert(room.clone(), last.message.clone());
-                    self.room_last_timestamp.insert(room.clone(), last.timestamp);
-                }
-            }
+            ServerMessage::RoomHistory { .. } => {}
             ServerMessage::Error { message, code } => {
                 if code.contains("NOT_AUTHENTICATED") {
                     self.connection_state = ConnectionState::Connected;
@@ -534,13 +513,7 @@ impl App {
         self.room_selected = 0;
     }
 
-    fn truncate_preview(s: &str, max_len: usize) -> String {
-        if s.len() <= max_len {
-            s.to_string()
-        } else {
-            format!("{}...", &s[..max_len])
-        }
-    }
+
     fn system_message(content: String) -> MessageEntry {
         MessageEntry {
             sender: "System".into(),
@@ -789,22 +762,8 @@ impl App {
                 for (index, room) in rooms_snapshot.iter().enumerate() {
                     let is_active = room == &self.room;
 
-                    // Get last message preview for this room
-                    let last_msg = self.room_last_message.get(room)
-                        .map(|s| Self::truncate_preview(s, 40))
-                        .unwrap_or_else(|| "No messages".to_string());
-                    let last_ts = self.room_last_timestamp.get(room)
-                        .map(|t| format_timestamp(*t))
-                        .unwrap_or_else(|| "".to_string());
-
-                    let preview_text = if last_msg.len() >= 40 {
-                        format!("{} {}", last_msg, last_ts)
-                    } else {
-                        format!("{}  {}", last_msg, last_ts)
-                    };
-
                     // Allocate painter for this room item (response + click detection)
-                    let item_height = 48.0; // approximate height for room name + preview
+                    let item_height = 36.0;
                     let (resp, painter) = ui.allocate_painter(
                         egui::vec2(ui.available_width(), item_height),
                         egui::Sense::click(),
@@ -846,17 +805,6 @@ impl App {
                         &room_label,
                         egui::FontId::new(14.0, egui::FontFamily::Proportional),
                         room_text_color,
-                    );
-
-                    // Preview text below room name
-                    let preview_color = egui::Color32::from_rgb(134, 150, 160);
-                    let preview_pos = egui::Pos2::new(resp.rect.min.x + 8.0, resp.rect.min.y + 22.0);
-                    painter.text(
-                        preview_pos,
-                        egui::Align2::LEFT_TOP,
-                        &preview_text,
-                        egui::FontId::new(11.0, egui::FontFamily::Proportional),
-                        preview_color,
                     );
 
                     ui.add_space(2.0);

@@ -9,16 +9,6 @@ pub fn resolve_sender(current_login: &str, remote_login: &str) -> String {
     }
 }
 
-/// Format a Unix timestamp into a human-readable string (full date+time).
-/// Used in the sidebar.
-pub fn format_timestamp(_timestamp: i64) -> String {
-    DateTime::<Utc>::from_timestamp(_timestamp, 0)
-        .map_or_else(
-            || "unknown time".to_string(),
-            |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-        )
-}
-
 /// Format a Unix timestamp as "HH:MM" for use inside chat message bubbles.
 pub fn format_timestamp_bubble(timestamp: i64) -> String {
     DateTime::<Utc>::from_timestamp(timestamp, 0)
@@ -48,12 +38,7 @@ pub fn format_date_separator(timestamp: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_timestamp, format_timestamp_bubble, format_date_separator};
-
-    #[test]
-    fn timestamp_uses_the_supplied_unix_time() {
-        assert_ne!(format_timestamp(0), "unknown time");
-    }
+    use super::{format_timestamp_bubble, format_date_separator};
 
     #[test]
     fn bubble_uses_only_time() {
