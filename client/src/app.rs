@@ -1099,8 +1099,8 @@ impl App {
         padding: f32,
     ) {
         // 1. Measure with painter.layout_no_wrap()
-        let sender_font = egui::FontId::new(10.0, egui::FontFamily::Proportional);
-        let content_font = egui::FontId::new(10.0, egui::FontFamily::Proportional);
+        let sender_font = egui::FontId::new(12.0, egui::FontFamily::Proportional);
+        let content_font = egui::FontId::new(14.0, egui::FontFamily::Proportional);
         let sender_text = format!("[{}] {}", sender, time_str);
 
         let sender_galley = ui
@@ -1174,14 +1174,14 @@ impl App {
                         MessageType::Chat => {
                             let is_own = message.is_own;
                             let bubble_color = if is_own {
-                                egui::Color32::from_rgb(46, 204, 113)
+                                egui::Color32::from_rgb(59, 130, 246)
                             } else {
-                                egui::Color32::from_rgb(50, 55, 62)
+                                egui::Color32::from_rgb(30, 33, 48)
                             };
                             let text_color = if is_own {
                                 egui::Color32::WHITE
                             } else {
-                                    egui::Color32::LIGHT_GRAY
+                                    egui::Color32::from_rgb(203, 214, 227)
                             };
                             let time_str = format_timestamp(message.timestamp);
 
@@ -1254,9 +1254,9 @@ impl App {
             return;
         }
         let mut visuals = egui::Visuals::dark();
-        visuals.selection.bg_fill = egui::Color32::from_rgb(46, 204, 113);
-        visuals.hyperlink_color = egui::Color32::from_rgb(46, 204, 113);
-        visuals.panel_fill = egui::Color32::from_rgb(24, 26, 32);
+        visuals.selection.bg_fill = egui::Color32::from_rgb(59, 130, 246);
+        visuals.hyperlink_color = egui::Color32::from_rgb(59, 130, 246);
+        visuals.panel_fill = egui::Color32::from_rgb(15, 17, 24);
         ctx.set_visuals(visuals);
         let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
         style
