@@ -1174,7 +1174,7 @@ impl App {
                         MessageType::Chat => {
                             let is_own = message.is_own;
                             let bubble_color = if is_own {
-                                egui::Color32::from_rgb(59, 130, 246)
+                                egui::Color32::from_rgb(67, 148, 239)
                             } else {
                                 egui::Color32::from_rgb(30, 33, 48)
                             };
@@ -1254,8 +1254,8 @@ impl App {
             return;
         }
         let mut visuals = egui::Visuals::dark();
-        visuals.selection.bg_fill = egui::Color32::from_rgb(59, 130, 246);
-        visuals.hyperlink_color = egui::Color32::from_rgb(59, 130, 246);
+        visuals.selection.bg_fill = egui::Color32::from_rgb(67, 148, 239);
+        visuals.hyperlink_color = egui::Color32::from_rgb(67, 148, 239);
         visuals.panel_fill = egui::Color32::from_rgb(15, 17, 24);
         ctx.set_visuals(visuals);
         let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
