@@ -140,13 +140,13 @@ impl Account {
     }
 
     /// Insert a chat message into the database.
-    pub fn insert_message(&self, room: String, sender: String, content: String) -> Result<()> {
+    pub fn insert_message(&self, room: String, sender: String, content: String) -> Result<u64> {
         let conn = self.lock_connection();
-        conn.execute(
+        let row_id = conn.execute(
             "INSERT INTO messages (room, sender, content) VALUES (?1, ?2, ?3)",
             (&room, &sender, &content),
         )?;
-        Ok(())
+        Ok(row_id as u64)
     }
 
     /// Get a page of messages from a room, cursor-based pagination.
