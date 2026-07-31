@@ -75,6 +75,7 @@ impl fmt::Debug for ClientMessage {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryEntry {
+    pub id: u64,
     pub login: String,
     pub timestamp: i64,
     pub message: String,
@@ -527,6 +528,7 @@ mod tests {
             ServerMessage::RoomHistory {
                 room: "general".to_string(),
                 messages: vec![HistoryEntry {
+                    id: 1,
                     login: "alice".to_string(),
                     timestamp: 1_735_732_800,
                     message: "Hello".to_string(),
@@ -804,6 +806,7 @@ mod tests {
     fn client_get_history_round_trips() {
         let msg = ClientMessage::GetHistory {
             room: "general".to_string(),
+            cursor: None,
         };
 
         let json = serialize_client_message(&msg).unwrap();
@@ -954,10 +957,12 @@ mod tests {
         let msg = ServerMessage::RoomHistory {
             room: "general".to_string(),
             messages: vec![HistoryEntry {
+                id: 1,
                 login: "alice".to_string(),
                 timestamp: 1_735_732_800,
                 message: "Hello".to_string(),
             }],
+            has_more: false,
         };
 
         let json = serialize_server_message(&msg).unwrap();
@@ -976,10 +981,12 @@ mod tests {
         let history = ServerMessage::RoomHistory {
             room: legacy_room.clone(),
             messages: vec![HistoryEntry {
+                id: 1,
                 login: legacy_login,
                 timestamp: 1_735_732_800,
                 message: "legacy row".to_string(),
             }],
+            has_more: false,
         };
 
         assert!(serialize_server_message(&room_list).is_ok());
