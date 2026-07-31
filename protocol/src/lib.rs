@@ -909,7 +909,7 @@ mod tests {
 
     #[test]
     fn server_incoming_message_serializes_with_timestamp() {
-        let msg = ServerMessage::IncomingMessage {
+        let _msg = ServerMessage::IncomingMessage {
             login: "alice".to_string(),
             room: "general".to_string(),
             message: "hello".to_string(),

@@ -165,6 +165,7 @@ impl Account {
     ) -> Result<(Vec<chatter_protocol::HistoryEntry>, bool)> {
         let conn = self.lock_connection();
         let cursor_param: Option<i64> = cursor.map(|c| c as i64);
+        let fetch_limit = limit + 1; // +1 to detect has_more
         let mut stmt = conn.prepare(
             "SELECT id, sender, content,
                     CASE
@@ -177,7 +178,7 @@ impl Account {
              ORDER BY id DESC
              LIMIT ?3",
         )?;
-        let rows = stmt.query_map(rusqlite::params![room, cursor_param, limit as i32], |row| {
+        let rows = stmt.query_map(rusqlite::params![room, cursor_param, fetch_limit as i32], |row| {
             Ok(chatter_protocol::HistoryEntry {
                 id: row.get::<_, i64>(0)? as u64,
                 login: row.get(1)?,
@@ -192,10 +193,11 @@ impl Account {
         }
         messages.reverse();
 
-        // has_more is true if we got exactly `limit` messages — there may be more
-        let has_more = messages.len() == limit;
+        // has_more is true if we got exactly `fetch_limit` messages — there may be more
+        let has_more = messages.len() == fetch_limit;
         if has_more {
-            messages.pop(); // remove the extra message used for detection
+            // After reverse, oldest message is at index 0 — remove it to keep limit messages
+            messages.remove(0);
         }
 
         Ok((messages, has_more))
@@ -539,7 +541,7 @@ mod tests {
     #[test]
     fn test_get_room_history_empty_room() {
         let account = test_account();
-        let history = account.get_room_history("general".to_string(), 50).unwrap();
+        let (history, _has_more) = account.get_room_history("general".to_string(), None, 50).unwrap();
         assert!(history.is_empty());
     }
 
@@ -561,7 +563,7 @@ mod tests {
             )
             .unwrap();
 
-        let history = account.get_room_history("general".to_string(), 50).unwrap();
+        let (history, _has_more) = account.get_room_history("general".to_string(), None, 50).unwrap();
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].message, "First");
         assert_eq!(history[1].message, "Second");
@@ -578,7 +580,7 @@ mod tests {
             )
             .unwrap();
 
-        let history = account.get_room_history("general".to_string(), 50).unwrap();
+        let (history, _has_more) = account.get_room_history("general".to_string(), None, 50).unwrap();
         let msg = &history[0];
         assert_eq!(msg.login, "alice");
         assert_eq!(msg.message, "Hello");
@@ -598,7 +600,7 @@ mod tests {
                 .unwrap();
         }
 
-        let history = account.get_room_history("general".to_string(), 3).unwrap();
+        let (history, _has_more) = account.get_room_history("general".to_string(), None, 3).unwrap();
         assert_eq!(history.len(), 3);
         assert_eq!(history[0].message, "msg7");
         assert_eq!(history[1].message, "msg8");
@@ -622,7 +624,7 @@ mod tests {
             )
             .unwrap();
 
-        let history = account.get_room_history("general".to_string(), 50).unwrap();
+        let (history, _has_more) = account.get_room_history("general".to_string(), None, 50).unwrap();
         assert_eq!(history.len(), 3);
         assert_eq!(history[0].message, "A");
         assert_eq!(history[1].message, "B");
@@ -647,8 +649,8 @@ mod tests {
             )
             .unwrap();
 
-        let general_history = account.get_room_history("general".to_string(), 50).unwrap();
-        let random_history = account.get_room_history("random".to_string(), 50).unwrap();
+        let (general_history, _has_more) = account.get_room_history("general".to_string(), None, 50).unwrap();
+        let (random_history, _has_more) = account.get_room_history("random".to_string(), None, 50).unwrap();
 
         assert_eq!(general_history.len(), 1);
         assert_eq!(general_history[0].message, "General msg");
@@ -763,7 +765,7 @@ mod tests {
             .unwrap();
 
         // Get history
-        let history = account.get_room_history("general".to_string(), 50).unwrap();
+        let (history, _has_more) = account.get_room_history("general".to_string(), None, 50).unwrap();
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].login, "alice");
         assert_eq!(history[1].login, "bob");
