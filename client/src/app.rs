@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use chrono::{DateTime, NaiveDate, Utc};
 use futures_util::{FutureExt, SinkExt, StreamExt};
@@ -75,6 +75,7 @@ pub enum MessageType {
 
 #[derive(Clone, Debug)]
 pub struct MessageEntry {
+    pub id: u64,
     pub sender: String,
     pub content: String,
     pub timestamp: i64,
@@ -120,7 +121,7 @@ pub struct App {
     running: bool,
     input: String,
     input_mode: InputMode,
-    messages: Vec<MessageEntry>,
+    messages: BTreeMap<u64, MessageEntry>,
     message_offset: usize,
     ws_sink: SharedSink,
     initial_read: SharedRead,
@@ -147,6 +148,8 @@ pub struct App {
     loading_older: bool,
     /// Whether the server has more older messages available.
     has_more_history: bool,
+    /// Monotonically increasing counter for system message ids.
+    system_message_id: u64,
 }
 
 impl App {
@@ -168,7 +171,11 @@ impl App {
             running: true,
             input: String::new(),
             input_mode: InputMode::Splash,
-            messages: vec![Self::system_message("Connecting to server...".into())],
+            messages: {
+                let id = 0u64;
+                std::iter::once((id, Self::system_message("Connecting to server...".into())))
+                    .collect()
+            },
             message_offset: 0,
             ws_sink,
             initial_read,
@@ -192,6 +199,7 @@ impl App {
             oldest_message_id: None,
             loading_older: false,
             has_more_history: false,
+            system_message_id: 1000, // Start above normal message ids
         }
     }
 
@@ -365,40 +373,52 @@ impl App {
                 self.login = login.clone();
                 self.connection_state = ConnectionState::LoggedIn { login };
                 self.input_mode = InputMode::Normal;
-                self.messages
-                    .push(Self::system_message("Login successful.".into()));
+                let id = self.system_message_id;
+                self.system_message_id += 1;
+                self.messages.insert(id, Self::system_message("Login successful.".into()));
                 self.join_room(String::new(), "general".into());
             }
             ServerMessage::LoginFailed { reason } => {
                 self.connection_state = ConnectionState::Connected;
                 self.password_input.clear();
                 self.input_mode = InputMode::EnteringPassword;
-                self.messages.push(Self::system_message(reason));
+                let id = self.system_message_id;
+                self.system_message_id += 1;
+                self.messages.insert(id, Self::system_message(reason));
             }
             ServerMessage::AccountCreated { login } => {
                 self.auth_mode = AuthMode::Login;
                 self.login_input = login;
                 self.password_input.clear();
                 self.input_mode = InputMode::EnteringLogin;
-                self.messages.push(Self::system_message(
+                let id = self.system_message_id;
+                self.system_message_id += 1;
+                self.messages.insert(id, Self::system_message(
                     "Account created. Please login.".into(),
                 ));
             }
             ServerMessage::AccountCreationFailed { reason } => {
                 self.password_input.clear();
                 self.input_mode = InputMode::EnteringPassword;
-                self.messages.push(Self::system_message(reason));
+                let id = self.system_message_id;
+                self.system_message_id += 1;
+                self.messages.insert(id, Self::system_message(reason));
             }
             ServerMessage::IncomingMessage {
+                id,
                 ref login,
                 ref room,
                 ref message,
                 timestamp,
             } => {
                 if *login == "Server" && room == "system" {
-                    self.messages.push(Self::system_message(message.clone()));
+                    let sys_id = self.system_message_id;
+                    self.system_message_id += 1;
+                    self.messages.insert(sys_id, Self::system_message(message.clone()));
                 } else if room == &self.room {
-                    self.messages.push(MessageEntry {
+                    // BTreeMap insert is idempotent: same id overwrites (dedup by design)
+                    self.messages.insert(id, MessageEntry {
+                        id,
                         sender: resolve_sender(&self.login, login),
                         content: message.clone(),
                         timestamp,
@@ -419,9 +439,11 @@ impl App {
 
                     if self.loading_older {
                         // Prepend older messages (loading history before current window)
-                        // Reverse messages so they appear in chronological order at the top
-                        let mut older: Vec<MessageEntry> = messages.into_iter().map(|entry| {
+                        // Messages come from server in reverse-chronological order,
+                        // reverse to chronological for BTreeMap insertion.
+                        let older: Vec<MessageEntry> = messages.into_iter().map(|entry| {
                             MessageEntry {
+                                id: entry.id,
                                 sender: resolve_sender(&self.login, &entry.login),
                                 content: entry.message,
                                 timestamp: entry.timestamp,
@@ -429,15 +451,10 @@ impl App {
                                 msg_type: MessageType::Chat,
                             }
                         }).collect();
-                        older.reverse();
 
-                        // Preserve scroll position: shift offset by the number of prepended messages
-                        let prepend_count = older.len();
-                        self.message_offset += prepend_count;
-
-                        // Insert at the beginning
-                        for (i, msg) in older.into_iter().enumerate() {
-                            self.messages.insert(i, msg);
+                        // Insert in reverse order so BTreeMap gets them sorted
+                        for msg in older.into_iter().rev() {
+                            self.messages.insert(msg.id, msg);
                         }
 
                         self.oldest_message_id = new_oldest;
@@ -453,7 +470,8 @@ impl App {
                             self.room_selected = self.rooms.iter().position(|r| r == &self.room).unwrap_or(0);
                         }
                         for entry in messages {
-                            self.messages.push(MessageEntry {
+                            self.messages.insert(entry.id, MessageEntry {
+                                id: entry.id,
                                 sender: resolve_sender(&self.login, &entry.login),
                                 content: entry.message,
                                 timestamp: entry.timestamp,
@@ -462,7 +480,9 @@ impl App {
                             });
                         }
                         // Push system message AFTER history so it appears at the bottom.
-                        self.messages.push(Self::system_message(format!("Joined room '{}'", room)));
+                        let join_id = self.system_message_id;
+                        self.system_message_id += 1;
+                        self.messages.insert(join_id, Self::system_message(format!("Joined room '{}'", room)));
                     }
 
                     // Store has_more for the "Load Older" button
@@ -474,12 +494,19 @@ impl App {
                     self.connection_state = ConnectionState::Connected;
                     self.input_mode = InputMode::Splash;
                 }
-                self.messages
-                    .push(Self::system_message(format!("[{code}] {message}")));
+                let id = self.system_message_id;
+                self.system_message_id += 1;
+                self.messages.insert(id, Self::system_message(format!("[{code}] {message}")));
             }
         }
+        // Keep only the most recent MAX_HISTORY messages (by id).
         if self.messages.len() > MAX_HISTORY {
-            self.messages.drain(..self.messages.len() - MAX_HISTORY);
+            let ids_to_remove: Vec<u64> = self.messages.keys().copied().take(
+                self.messages.len() - MAX_HISTORY
+            ).collect();
+            for id in ids_to_remove {
+                self.messages.remove(&id);
+            }
         }
         self.message_offset = self.messages.len().saturating_sub(1);
     }
@@ -489,7 +516,9 @@ impl App {
         self.connection_state = ConnectionState::Disconnected;
         self.input_mode = InputMode::Disconnected;
         self.reconnect_pending = true;
-        self.messages.push(Self::system_message(
+        let id = self.system_message_id;
+        self.system_message_id += 1;
+        self.messages.insert(id, Self::system_message(
             format!(
                 "Disconnected{}",
                 close_code
@@ -500,8 +529,9 @@ impl App {
         self.start_reconnect();
     }
     fn handle_connection_error(&mut self, reason: String) {
-        self.messages
-            .push(Self::system_message(format!("Connection error: {reason}")));
+        let id = self.system_message_id;
+        self.system_message_id += 1;
+        self.messages.insert(id, Self::system_message(format!("Connection error: {reason}")));
         self.handle_disconnect(None, None);
     }
     fn start_reconnect(&mut self) {
@@ -574,6 +604,7 @@ impl App {
 
     fn system_message(content: String) -> MessageEntry {
         MessageEntry {
+            id: 0,
             sender: "System".into(),
             content: String::new(),
             timestamp: 0,
@@ -588,7 +619,9 @@ impl App {
 
     fn submit_credentials(&mut self) {
         if self.login_input.trim().is_empty() || self.password_input.is_empty() {
-            self.messages.push(Self::system_message(
+            let id = self.system_message_id;
+            self.system_message_id += 1;
+            self.messages.insert(id, Self::system_message(
                 "Login and password are required.".into(),
             ));
             return;
@@ -613,7 +646,10 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        self.messages.push(MessageEntry {
+        let id = self.system_message_id;
+        self.system_message_id += 1;
+        self.messages.insert(id, MessageEntry {
+            id: id, // local echo placeholder; server will confirm with real id
             sender: resolve_sender(&self.login, &self.login),
             content: message.clone(),
             timestamp: now,
@@ -787,7 +823,9 @@ impl App {
             self.login.clear();
             self.room.clear();
             self.messages.clear();
-            self.messages.push(Self::system_message("Connecting to server...".into()));
+            let id = self.system_message_id;
+            self.system_message_id += 1;
+            self.messages.insert(id, Self::system_message("Connecting to server...".into()));
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
@@ -798,7 +836,9 @@ impl App {
                 self.login.clear();
                 self.room.clear();
                 self.messages.clear();
-                self.messages.push(Self::system_message("Connecting to server...".into()));
+                let id = self.system_message_id;
+                self.system_message_id += 1;
+                self.messages.insert(id, Self::system_message("Connecting to server...".into()));
             }
         });
     }
@@ -1128,7 +1168,7 @@ impl App {
         let corner_radius = 10.0;
         let mut last_date: Option<NaiveDate> = None;
 
-        for message in &self.messages {
+        for (_id, message) in &self.messages {
             match &message.msg_type {
                 MessageType::System(content) => {
                     ui.horizontal(|ui| {
@@ -1319,17 +1359,20 @@ impl App {
             && self.connect_notify.notified().now_or_never().is_some()
         {
             self.connection_state = ConnectionState::Connected;
-            self.messages
-                .push(Self::system_message("Connection established.".into()));
+            let id = self.system_message_id;
+            self.system_message_id += 1;
+            self.messages.insert(id, Self::system_message("Connection established.".into()));
         }
         self.run_pending_action();
         while let Ok(result) = self.action_rx.try_recv() {
             match result {
                 ActionResult::Sent => {}
                 ActionResult::Joined => {}
-                ActionResult::Failed(reason) => self
-                    .messages
-                    .push(Self::system_message(format!("Action failed: {reason}"))),
+                ActionResult::Failed(reason) => {
+                    let id = self.system_message_id;
+                    self.system_message_id += 1;
+                    self.messages.insert(id, Self::system_message(format!("Action failed: {reason}")));
+                }
             }
         }
         if !self.running {
