@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use tungstenite::protocol::Message;
 
-pub const MAX_PAYLOAD_LEN: usize = 16 * 1024;
+pub const MAX_PAYLOAD_LEN: usize = 256 * 1024;
 pub const MIN_LOGIN_LEN: usize = 2;
 /// Legacy protocol/display login limit. Existing SQLite rows may contain
 /// names created before the stricter account-creation policy.
@@ -19,7 +19,7 @@ pub const MAX_ROOM_LEN: usize = 64;
 pub const MAX_NEW_ROOM_LEN: usize = 32;
 pub const MAX_CHAT_MESSAGE_LEN: usize = 4096;
 pub const MAX_REASON_LEN: usize = 1024;
-pub const MAX_HISTORY_ENTRIES: usize = 100;
+pub const MAX_HISTORY_ENTRIES: usize = 1000;
 
 const RESERVED_LOGIN_PREFIXES: &[&str] = &["server", "system", "admin", "root", "anonymous"];
 
