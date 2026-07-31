@@ -94,6 +94,7 @@ pub enum ServerMessage {
     AccountCreationFailed { reason: String },
     /// Incoming message from a user in a room.
     IncomingMessage {
+        id: u64,
         login: String,
         room: String,
         message: String,
@@ -371,6 +372,7 @@ fn validate_server_message(message: &ServerMessage) -> Result<()> {
             validate_required_text(reason, "reason", MAX_REASON_LEN)?;
         }
         ServerMessage::IncomingMessage {
+            id: _,
             login,
             room,
             message,
@@ -460,6 +462,7 @@ pub fn create_incoming_message(
     timestamp: i64,
 ) -> Result<String> {
     serialize_server_message(&ServerMessage::IncomingMessage {
+        id: 0, // test helper uses id=0
         login,
         room,
         message,
@@ -517,6 +520,7 @@ mod tests {
                 reason: "login already exists".to_string(),
             },
             ServerMessage::IncomingMessage {
+                id: 1,
                 login: "alice".to_string(),
                 room: "general".to_string(),
                 message: "Hello from the server".to_string(),
@@ -895,6 +899,7 @@ mod tests {
     #[test]
     fn server_incoming_message_round_trips() {
         let msg = ServerMessage::IncomingMessage {
+            id: 42,
             login: "bob".to_string(),
             room: "random".to_string(),
             message: "Hi there!".to_string(),
@@ -910,6 +915,7 @@ mod tests {
     #[test]
     fn server_incoming_message_serializes_with_timestamp() {
         let _msg = ServerMessage::IncomingMessage {
+            id: 0,
             login: "alice".to_string(),
             room: "general".to_string(),
             message: "hello".to_string(),
@@ -926,6 +932,7 @@ mod tests {
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::IncomingMessage {
+                id: _,
                 login,
                 room,
                 message,
@@ -996,6 +1003,7 @@ mod tests {
     #[test]
     fn server_messages_reject_control_characters() {
         let incoming = ServerMessage::IncomingMessage {
+            id: 1,
             login: "alice".to_string(),
             room: "general".to_string(),
             message: "hello\u{1b}[2J".to_string(),
@@ -1208,12 +1216,13 @@ mod tests {
     #[test]
     fn parse_server_message_parses_text_frame() {
         let result = parse_server_message(text_message(
-            r#"{"IncomingMessage":{"login":"alice","room":"general","message":"Hi!","timestamp":0}}"#,
+            r#"{"IncomingMessage":{"id":42,"login":"alice","room":"general","message":"Hi!","timestamp":0}}"#,
         ));
 
         assert_eq!(
             result.unwrap(),
             ServerMessage::IncomingMessage {
+                id: 42,
                 login: "alice".to_string(),
                 room: "general".to_string(),
                 message: "Hi!".to_string(),
