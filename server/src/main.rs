@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -35,6 +35,7 @@ const ACCOUNT_BACKOFF_BASE_MS: u64 = 250;
 const ACCOUNT_BACKOFF_MAX_MS: u64 = 8_000;
 
 static ACCOUNT_TASKS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+static SYSTEM_MSG_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct AccountTaskPermit;
 
@@ -357,19 +358,20 @@ async fn process_data(
                 }
             }
 
-            if let Err(e) = run_account_task({
+            let msg_id = run_account_task({
                 let account_db = account_db.clone();
                 let room = room.clone();
                 let login = login.clone();
                 let message = message.clone();
                 move || account_db.insert_message(room, login, message)
             })
-            .await
-            {
-                warn!("Failed to persist message: {}", e);
-            }
+            .await;
 
-            broadcast_to_room(&peer_map, &addr, &login, &room, &message).ok();
+            if let Err(e) = &msg_id {
+                warn!("Failed to persist message: {}", e);
+            } else {
+                broadcast_to_room(&peer_map, &addr, &login, &room, &message, msg_id.unwrap()).ok();
+            }
         }
         chatter_protocol::ClientMessage::GetHistory { room, cursor } => {
             if let Err(error) = authenticated_login(&peer_map, addr) {
@@ -461,7 +463,7 @@ pub(crate) fn send_history(
     )
 }
 
-/// Broadcast a system message to all peers in the same room except the sender.
+/// Send a system notification to all peers in the given room.
 /// Uses `login: "Server"` and `room: "system"` so the client renders it as a
 /// system notification (dark gray, `[HH:MM] [System] ...` format).
 pub(crate) fn broadcast_system_message(
@@ -470,7 +472,9 @@ pub(crate) fn broadcast_system_message(
     room: &str,
     message: &str,
 ) -> ServerResult {
+    let msg_id = SYSTEM_MSG_COUNTER.fetch_add(1, Ordering::Relaxed);
     let broadcast_msg = chatter_protocol::ServerMessage::IncomingMessage {
+        id: msg_id,
         login: "Server".to_string(),
         room: "system".to_string(),
         message: message.to_string(),
@@ -510,8 +514,10 @@ pub(crate) fn broadcast_to_room(
     login: &str,
     room: &str,
     message: &str,
+    msg_id: u64,
 ) -> ServerResult {
     let broadcast_msg = chatter_protocol::ServerMessage::IncomingMessage {
+        id: msg_id,
         login: login.to_string(),
         room: room.to_string(),
         message: message.to_string(),
