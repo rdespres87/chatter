@@ -590,6 +590,7 @@ mod tests {
     #[test]
     fn test_get_room_history_limit() {
         let account = test_account();
+        // Insert 10 messages, page size 3 → should return last 3 with has_more=true
         for i in 0..10 {
             account
                 .insert_message(
@@ -600,11 +601,114 @@ mod tests {
                 .unwrap();
         }
 
-        let (history, _has_more) = account.get_room_history("general".to_string(), None, 3).unwrap();
+        let (history, has_more) = account.get_room_history("general".to_string(), None, 3).unwrap();
         assert_eq!(history.len(), 3);
+        // Messages are oldest-first: msg7, msg8, msg9 (the last 3 inserted)
         assert_eq!(history[0].message, "msg7");
         assert_eq!(history[1].message, "msg8");
         assert_eq!(history[2].message, "msg9");
+        assert!(has_more, "should report has_more=true when more messages exist");
+    }
+
+    #[test]
+    fn test_get_room_history_has_more_true() {
+        let account = test_account();
+        // Insert 5 messages, page size 2 → should have has_more=true
+        for i in 0..5 {
+            account
+                .insert_message(
+                    "general".to_string(),
+                    "user".to_string(),
+                    format!("msg{}", i),
+                )
+                .unwrap();
+        }
+
+        let (page1, has_more) = account.get_room_history("general".to_string(), None, 2).unwrap();
+        assert_eq!(page1.len(), 2);
+        assert!(has_more, "has_more should be true when messages remain");
+    }
+
+    #[test]
+    fn test_get_room_history_cursor_pagination() {
+        let account = test_account();
+        // Insert 10 messages, page size 3 → tests cursor pagination across multiple pages
+        for i in 0..10 {
+            account
+                .insert_message(
+                    "general".to_string(),
+                    "user".to_string(),
+                    format!("msg{}", i),
+                )
+                .unwrap();
+        }
+
+        // Get first page (oldest-first after reverse)
+        let (page1, has_more) = account
+            .get_room_history("general".to_string(), None, 3)
+            .unwrap();
+        assert_eq!(page1.len(), 3);
+        // First page of 10 messages with size 3 → has_more=true
+        assert!(has_more, "first page should have has_more=true");
+
+        // Use oldest message ID from page1 as cursor for next page (page is oldest-first)
+        let mut current_cursor = page1.first().unwrap().id;
+
+        // Continue until has_more=false (exhaust all pages)
+        let mut all_entries = page1;
+        loop {
+            let (next_page, next_has_more) = account
+                .get_room_history("general".to_string(), Some(current_cursor), 3)
+                .unwrap();
+            if next_page.is_empty() {
+                break;
+            }
+            // Verify cursor filtering
+            for entry in &next_page {
+                assert!(
+                    entry.id < current_cursor,
+                    "cursor pagination should return only older messages (got {} >= {})",
+                    entry.id,
+                    current_cursor
+                );
+            }
+            // Save cursor from the new page before extending (next_page will be moved)
+            let next_cursor = next_page.first().unwrap().id;
+            all_entries.extend(next_page);
+            if !next_has_more {
+                break;
+            }
+            // Cursor must be the OLDEST message in the *new* page
+            current_cursor = next_cursor;
+        }
+
+        // Should have retrieved all 10 messages
+        assert_eq!(all_entries.len(), 10, "cursor pagination should retrieve all messages");
+    }
+
+    #[test]
+    fn test_get_room_history_has_more_false() {
+        let account = test_account();
+        // Insert exactly 3 messages (fits in one page of size 5)
+        for i in 0..3 {
+            account
+                .insert_message(
+                    "general".to_string(),
+                    "user".to_string(),
+                    format!("msg{}", i),
+                )
+                .unwrap();
+        }
+
+        // Get with page size 5 — all messages fit in one page
+        let (page1, has_more) = account
+            .get_room_history("general".to_string(), None, 5)
+            .unwrap();
+        assert_eq!(page1.len(), 3);
+        assert!(
+            !has_more,
+            "has_more should be false when all messages fit in one page"
+        );
     }
 
     #[test]
