@@ -149,29 +149,40 @@ impl Account {
         Ok(())
     }
 
-    /// Get the last N messages from a room.
+    /// Get a page of messages from a room, cursor-based pagination.
+    ///
+    /// When `cursor` is `None`, returns the most recent `limit` messages.
+    /// When `cursor` is `Some(id)`, returns messages with `id < cursor`,
+    /// enabling the client to load older messages on demand.
+    ///
+    /// Returns `(messages, has_more)` where `has_more` indicates whether
+    /// additional older messages are available beyond this page.
     pub fn get_room_history(
         &self,
         room: String,
-        limit: i32,
-    ) -> Result<Vec<chatter_protocol::HistoryEntry>> {
+        cursor: Option<u64>,
+        limit: usize,
+    ) -> Result<(Vec<chatter_protocol::HistoryEntry>, bool)> {
         let conn = self.lock_connection();
+        let cursor_param: Option<i64> = cursor.map(|c| c as i64);
         let mut stmt = conn.prepare(
-            "SELECT sender, content,
+            "SELECT id, sender, content,
                     CASE
                         WHEN typeof(timestamp) = 'integer' THEN timestamp
                         ELSE unixepoch(timestamp)
                     END AS timestamp_unix
              FROM messages
              WHERE room = ?1
+               AND (?2 IS NULL OR id < CAST(?2 AS INTEGER))
              ORDER BY id DESC
-             LIMIT ?2",
+             LIMIT ?3",
         )?;
-        let rows = stmt.query_map(rusqlite::params![room, limit], |row| {
+        let rows = stmt.query_map(rusqlite::params![room, cursor_param, limit as i32], |row| {
             Ok(chatter_protocol::HistoryEntry {
-                login: row.get(0)?,
-                message: row.get(1)?,
-                timestamp: row.get::<_, Option<i64>>(2)?.unwrap_or_default(),
+                id: row.get::<_, i64>(0)? as u64,
+                login: row.get(1)?,
+                message: row.get(2)?,
+                timestamp: row.get::<_, Option<i64>>(3)?.unwrap_or_default(),
             })
         })?;
 
@@ -180,7 +191,14 @@ impl Account {
             messages.push(row?);
         }
         messages.reverse();
-        Ok(messages)
+
+        // has_more is true if we got exactly `limit` messages — there may be more
+        let has_more = messages.len() == limit;
+        if has_more {
+            messages.pop(); // remove the extra message used for detection
+        }
+
+        Ok((messages, has_more))
     }
 
     /// Get the list of rooms that have messages.

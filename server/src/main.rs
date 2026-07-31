@@ -24,11 +24,15 @@ pub mod account;
 
 type Tx = UnboundedSender<Message>;
 
+const TRANSPORT_SECURITY_NOTICE: &str = "SECURITY: this server accepts plain ws:// connections. Deploy it only behind a TLS-terminating reverse proxy (wss:// to clients), otherwise credentials cross the network in cleartext.";
+
+/// Number of messages per page for cursor-based pagination.
+pub(crate) const HISTORY_PAGE_SIZE: usize = 100;
+
 const MAX_CONCURRENT_ACCOUNT_TASKS: usize = 64;
 const ACCOUNT_TASK_RETRY_DELAY_MS: u64 = 10;
 const ACCOUNT_BACKOFF_BASE_MS: u64 = 250;
 const ACCOUNT_BACKOFF_MAX_MS: u64 = 8_000;
-const TRANSPORT_SECURITY_NOTICE: &str = "SECURITY: this server accepts plain ws:// connections. Deploy it only behind a TLS-terminating reverse proxy (wss:// to clients), otherwise credentials cross the network in cleartext.";
 
 static ACCOUNT_TASKS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
@@ -367,7 +371,7 @@ async fn process_data(
 
             broadcast_to_room(&peer_map, &addr, &login, &room, &message).ok();
         }
-        chatter_protocol::ClientMessage::GetHistory { room } => {
+        chatter_protocol::ClientMessage::GetHistory { room, cursor } => {
             if let Err(error) = authenticated_login(&peer_map, addr) {
                 send_server_message(&peer_map, addr, error).ok();
                 return;
@@ -393,14 +397,15 @@ async fn process_data(
                 }
             }
 
-            if let Ok(history) = run_account_task({
+            if let Ok((history, has_more)) = run_account_task({
                 let account_db = account_db.clone();
                 let room = room.clone();
-                move || account_db.get_room_history(room, i32::MAX)
+                let cursor = cursor.clone();
+                move || account_db.get_room_history(room, cursor, HISTORY_PAGE_SIZE)
             })
             .await
             {
-                send_history(&peer_map, addr, room, history).ok();
+                send_history(&peer_map, addr, room, history, has_more).ok();
             }
         }
     }
@@ -447,11 +452,12 @@ pub(crate) fn send_history(
     addr: SocketAddr,
     room: String,
     messages: Vec<chatter_protocol::HistoryEntry>,
+    has_more: bool,
 ) -> ServerResult {
     send_server_message(
         peer_map,
         addr,
-        chatter_protocol::ServerMessage::RoomHistory { room, messages },
+        chatter_protocol::ServerMessage::RoomHistory { room, messages, has_more },
     )
 }
 

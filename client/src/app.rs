@@ -104,7 +104,7 @@ enum PendingAction {
     SendMessage { room: String, message: String },
     LeaveRoom { room: String },
     JoinRoom { room: String },
-    GetHistory { room: String },
+    GetHistory { room: String, cursor: Option<u64> },
 }
 
 #[derive(Debug)]
@@ -141,6 +141,12 @@ pub struct App {
     action_rx: mpsc::UnboundedReceiver<ActionResult>,
     connection_state: ConnectionState,
     theme_configured: bool,
+    /// Oldest message id loaded so far (for cursor-based pagination).
+    oldest_message_id: Option<u64>,
+    /// Whether we are currently loading older messages (pauses scroll-to-bottom).
+    loading_older: bool,
+    /// Whether the server has more older messages available.
+    has_more_history: bool,
 }
 
 impl App {
@@ -183,6 +189,9 @@ impl App {
             action_rx,
             connection_state: ConnectionState::Connecting,
             theme_configured: false,
+            oldest_message_id: None,
+            loading_older: false,
+            has_more_history: false,
         }
     }
 
@@ -402,27 +411,62 @@ impl App {
                 self.rooms = rooms;
                 self.room_selected = self.rooms.iter().position(|r| r == &self.room).unwrap_or(0);
             }
-            ServerMessage::RoomHistory { room, messages } => {
+            ServerMessage::RoomHistory { room, messages, has_more } => {
                 // If this RoomHistory is for a room we're no longer in, ignore it.
                 if self.room == room {
-                    // Clear + replace — this is an explicit GetHistory response, not a stream.
-                    self.messages.clear();
-                    // Initialize room if empty (reconnect edge case).
-                    if self.room.is_empty() {
-                        self.room = room.clone();
-                        self.room_selected = self.rooms.iter().position(|r| r == &self.room).unwrap_or(0);
+                    // Track oldest message id for next cursor
+                    let new_oldest = messages.iter().min_by_key(|e| e.id).map(|e| e.id);
+
+                    if self.loading_older {
+                        // Prepend older messages (loading history before current window)
+                        // Reverse messages so they appear in chronological order at the top
+                        let mut older: Vec<MessageEntry> = messages.into_iter().map(|entry| {
+                            MessageEntry {
+                                sender: resolve_sender(&self.login, &entry.login),
+                                content: entry.message,
+                                timestamp: entry.timestamp,
+                                is_own: entry.login == self.login,
+                                msg_type: MessageType::Chat,
+                            }
+                        }).collect();
+                        older.reverse();
+
+                        // Preserve scroll position: shift offset by the number of prepended messages
+                        let prepend_count = older.len();
+                        self.message_offset += prepend_count;
+
+                        // Insert at the beginning
+                        for (i, msg) in older.into_iter().enumerate() {
+                            self.messages.insert(i, msg);
+                        }
+
+                        self.oldest_message_id = new_oldest;
+                        self.loading_older = false;
+                    } else {
+                        // Clear + replace — initial load or rejoin
+                        self.messages.clear();
+                        self.oldest_message_id = new_oldest;
+
+                        // Initialize room if empty (reconnect edge case).
+                        if self.room.is_empty() {
+                            self.room = room.clone();
+                            self.room_selected = self.rooms.iter().position(|r| r == &self.room).unwrap_or(0);
+                        }
+                        for entry in messages {
+                            self.messages.push(MessageEntry {
+                                sender: resolve_sender(&self.login, &entry.login),
+                                content: entry.message,
+                                timestamp: entry.timestamp,
+                                is_own: entry.login == self.login,
+                                msg_type: MessageType::Chat,
+                            });
+                        }
+                        // Push system message AFTER history so it appears at the bottom.
+                        self.messages.push(Self::system_message(format!("Joined room '{}'", room)));
                     }
-                    for entry in messages {
-                        self.messages.push(MessageEntry {
-                            sender: resolve_sender(&self.login, &entry.login),
-                            content: entry.message,
-                            timestamp: entry.timestamp,
-                            is_own: entry.login == self.login,
-                            msg_type: MessageType::Chat,
-                        });
-                    }
-                    // Push system message AFTER history so it appears at the bottom.
-                    self.messages.push(Self::system_message(format!("Joined room '{}'", room)));
+
+                    // Store has_more for the "Load Older" button
+                    self.has_more_history = has_more;
                 }
             }
             ServerMessage::Error { message, code } => {
@@ -500,9 +544,23 @@ impl App {
         self.input_mode = InputMode::Normal;
         // Clear messages now — RoomHistory handler will replace them.
         self.messages.clear();
+        self.oldest_message_id = None;
+        self.loading_older = false;
+        self.has_more_history = false;
         // JoinRoom first so the server knows we're in the room, then GetHistory.
         self.pending_actions.push(PendingAction::JoinRoom { room: room.clone() });
-        self.pending_actions.push(PendingAction::GetHistory { room });
+        // Initial load: cursor=None means "give me the latest page".
+        self.pending_actions.push(PendingAction::GetHistory { room, cursor: None });
+    }
+    /// Queue a request for older messages (cursor-based pagination).
+    fn load_older(&mut self) {
+        if self.loading_older || self.oldest_message_id.is_none() || !self.has_more_history {
+            return;
+        }
+        self.loading_older = true;
+        let room = self.room.clone();
+        let cursor = self.oldest_message_id;
+        self.pending_actions.push(PendingAction::GetHistory { room, cursor });
     }
     fn reset_room_on_disconnect(&mut self) {
         // If we were in a room, leave it before resetting (matches ratatui reconnect behavior).
@@ -598,7 +656,7 @@ impl App {
                 }
                 PendingAction::JoinRoom { room } => (ClientMessage::JoinRoom { room }, true),
                 PendingAction::LeaveRoom { room } => (ClientMessage::LeaveRoom { room }, false),
-                PendingAction::GetHistory { room } => (ClientMessage::GetHistory { room }, false),
+                PendingAction::GetHistory { room, cursor } => (ClientMessage::GetHistory { room, cursor }, false),
             };
             let result = async {
                 let json = chatter_protocol::serialize_client_message(&message)
@@ -916,10 +974,21 @@ impl App {
             egui::ScrollArea::vertical()
                 .auto_shrink([true; 2])
                 .max_height(chat_area_height)
-                .stick_to_bottom(true)
+                .stick_to_bottom(!self.loading_older)
                 .show(ui, |ui| {
                     self.render_messages(ui);
                 });
+
+            // "Load Older" button above input bar (only when has_more_history)
+            if self.has_more_history && !self.loading_older {
+                ui.add_space(2.0);
+                if ui.button("⬆ Load Older").clicked() {
+                    self.load_older();
+                }
+            } else if self.loading_older {
+                ui.add_space(2.0);
+                ui.label("Loading older messages...");
+            }
 
             // Input bar at bottom (outside scroll area)
             ui.add_space(4.0);
