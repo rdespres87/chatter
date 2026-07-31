@@ -36,8 +36,11 @@ pub enum ClientMessage {
     LeaveRoom { room: String },
     /// Send a message to a room. The server derives the user identity from the session.
     SendMessage { room: String, message: String },
-    /// Request history for a room.
-    GetHistory { room: String },
+    /// Request history for a room. `cursor` is the id of the last message
+    /// already seen — only messages with a smaller id are returned, enabling
+    /// cursor-based pagination.  Omit `cursor` (or pass `None`) to fetch the
+    /// most recent chunk.
+    GetHistory { room: String, cursor: Option<u64> },
 }
 
 impl fmt::Debug for ClientMessage {
@@ -60,7 +63,11 @@ impl fmt::Debug for ClientMessage {
                 .field("room", room)
                 .field("message", message)
                 .finish(),
-            Self::GetHistory { room } => f.debug_struct("GetHistory").field("room", room).finish(),
+            Self::GetHistory { room, cursor } => f
+                .debug_struct("GetHistory")
+                .field("room", room)
+                .field("cursor", cursor)
+                .finish(),
         }
     }
 }
@@ -97,6 +104,8 @@ pub enum ServerMessage {
     RoomHistory {
         room: String,
         messages: Vec<HistoryEntry>,
+        /// True when more messages are available beyond this chunk.
+        has_more: bool,
     },
     /// Generic server-side error.
     Error { message: String, code: String },
@@ -262,8 +271,11 @@ pub fn validate_client_message(msg: &mut ClientMessage) -> Result<()> {
             validate_login_password(passwd)?;
         }
         ClientMessage::JoinRoom { room }
-        | ClientMessage::LeaveRoom { room }
-        | ClientMessage::GetHistory { room } => {
+        | ClientMessage::LeaveRoom { room } => {
+            normalize_required_field(room);
+            validate_room(room)?;
+        }
+        ClientMessage::GetHistory { room, .. } => {
             normalize_required_field(room);
             validate_room(room)?;
         }
@@ -334,7 +346,7 @@ fn normalized_client_message(message: &ClientMessage) -> Result<Cow<'_, ClientMe
                 }))
             }
         }
-        ClientMessage::GetHistory { room } => {
+        ClientMessage::GetHistory { room, cursor } => {
             let room = normalized_text(room);
             validate_room(&room)?;
             if matches!(room, Cow::Borrowed(_)) {
@@ -342,6 +354,7 @@ fn normalized_client_message(message: &ClientMessage) -> Result<Cow<'_, ClientMe
             } else {
                 Ok(Cow::Owned(ClientMessage::GetHistory {
                     room: room.into_owned(),
+                    cursor: cursor.clone(),
                 }))
             }
         }
@@ -374,7 +387,7 @@ fn validate_server_message(message: &ServerMessage) -> Result<()> {
                 validate_required_text(room, "room", MAX_ROOM_LEN)?;
             }
         }
-        ServerMessage::RoomHistory { room, messages } => {
+        ServerMessage::RoomHistory { room, messages, .. } => {
             validate_required_text(room, "room", MAX_ROOM_LEN)?;
             if messages.len() > MAX_HISTORY_ENTRIES {
                 bail!("room history exceeds {MAX_HISTORY_ENTRIES} entries");
@@ -483,6 +496,7 @@ mod tests {
             },
             ClientMessage::GetHistory {
                 room: "general".to_string(),
+                cursor: None,
             },
         ]
     }
@@ -517,6 +531,7 @@ mod tests {
                     timestamp: 1_735_732_800,
                     message: "Hello".to_string(),
                 }],
+                has_more: false,
             },
             ServerMessage::Error {
                 message: "Something went wrong".to_string(),
