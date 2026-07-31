@@ -203,18 +203,6 @@ impl Account {
         }
         Ok(result)
     }
-
-    pub fn list_accounts(&self) -> Result<()> {
-        let conn = self.lock_connection();
-        let mut stmt = conn.prepare("SELECT name FROM account")?;
-        let accounts = stmt.query_map([], |row| row.get::<_, String>(0))?;
-
-        for account in accounts {
-            let acc = account?;
-            println!("Found account: {}", acc);
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
