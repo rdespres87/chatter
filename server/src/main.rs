@@ -2,8 +2,8 @@ use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
     sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering},
+        Arc,
     },
     time::{Duration, Instant},
 };
@@ -11,7 +11,7 @@ use std::{
 use clap::Parser;
 
 use futures_channel::mpsc::UnboundedSender;
-use futures_util::{StreamExt, future, pin_mut, stream::TryStreamExt};
+use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
 
 use anyhow::Context;
 use log::{error, info, warn};
@@ -304,16 +304,6 @@ async fn process_data(
                 &format!("{} joined the room", login),
             )
             .ok();
-
-            if let Ok(history) = run_account_task({
-                let account_db = account_db.clone();
-                let room = room.clone();
-                move || account_db.get_room_history(room, i32::MAX)
-            })
-            .await
-            {
-                send_history(&peer_map, addr, room.clone(), history).ok();
-            }
         }
         chatter_protocol::ClientMessage::LeaveRoom { room } => {
             let login = match authenticated_login(&peer_map, addr) {

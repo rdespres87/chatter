@@ -104,6 +104,7 @@ enum PendingAction {
     SendMessage { room: String, message: String },
     LeaveRoom { room: String },
     JoinRoom { room: String },
+    GetHistory { room: String },
 }
 
 #[derive(Debug)]
@@ -401,19 +402,29 @@ impl App {
                 self.rooms = rooms;
                 self.room_selected = self.rooms.iter().position(|r| r == &self.room).unwrap_or(0);
             }
-            ServerMessage::RoomHistory { room, messages } if room == self.room => {
-                self.messages = messages
-                    .into_iter()
-                    .map(|entry| MessageEntry {
-                        sender: resolve_sender(&self.login, &entry.login),
-                        content: entry.message,
-                        timestamp: entry.timestamp,
-                        is_own: entry.login == self.login,
-                        msg_type: MessageType::Chat,
-                    })
-                    .collect();
+            ServerMessage::RoomHistory { room, messages } => {
+                // If this RoomHistory is for a room we're no longer in, ignore it.
+                if self.room == room {
+                    // Clear + replace — this is an explicit GetHistory response, not a stream.
+                    self.messages.clear();
+                    // Initialize room if empty (reconnect edge case).
+                    if self.room.is_empty() {
+                        self.room = room.clone();
+                        self.room_selected = self.rooms.iter().position(|r| r == &self.room).unwrap_or(0);
+                    }
+                    for entry in messages {
+                        self.messages.push(MessageEntry {
+                            sender: resolve_sender(&self.login, &entry.login),
+                            content: entry.message,
+                            timestamp: entry.timestamp,
+                            is_own: entry.login == self.login,
+                            msg_type: MessageType::Chat,
+                        });
+                    }
+                    // Push system message AFTER history so it appears at the bottom.
+                    self.messages.push(Self::system_message(format!("Joined room '{}'", room)));
+                }
             }
-            ServerMessage::RoomHistory { .. } => {}
             ServerMessage::Error { message, code } => {
                 if code.contains("NOT_AUTHENTICATED") {
                     self.connection_state = ConnectionState::Connected;
@@ -483,26 +494,15 @@ impl App {
     }
     fn join_room(&mut self, old_room: String, room: String) {
         if !old_room.is_empty() && old_room != room {
-            self.messages.clear();
             self.pending_actions.push(PendingAction::LeaveRoom { room: old_room });
         }
         self.room = room.clone();
         self.input_mode = InputMode::Normal;
-        self.messages
-            .push(Self::system_message(format!("Joined room '{room}'")));
-        self.pending_actions.push(PendingAction::JoinRoom { room });
-    }
-    fn load_history(&self) {
-        let room = self.room.clone();
-        let sink = self.ws_sink.clone();
-        tokio::spawn(async move {
-            if let Ok(json) =
-                chatter_protocol::serialize_client_message(&ClientMessage::GetHistory { room })
-                && let Some(ws) = sink.lock().await.as_mut()
-            {
-                let _ = ws.send(Message::Text(json.into())).await;
-            }
-        });
+        // Clear messages now — RoomHistory handler will replace them.
+        self.messages.clear();
+        // JoinRoom first so the server knows we're in the room, then GetHistory.
+        self.pending_actions.push(PendingAction::JoinRoom { room: room.clone() });
+        self.pending_actions.push(PendingAction::GetHistory { room });
     }
     fn reset_room_on_disconnect(&mut self) {
         // If we were in a room, leave it before resetting (matches ratatui reconnect behavior).
@@ -598,6 +598,7 @@ impl App {
                 }
                 PendingAction::JoinRoom { room } => (ClientMessage::JoinRoom { room }, true),
                 PendingAction::LeaveRoom { room } => (ClientMessage::LeaveRoom { room }, false),
+                PendingAction::GetHistory { room } => (ClientMessage::GetHistory { room }, false),
             };
             let result = async {
                 let json = chatter_protocol::serialize_client_message(&message)
@@ -1256,7 +1257,7 @@ impl App {
         while let Ok(result) = self.action_rx.try_recv() {
             match result {
                 ActionResult::Sent => {}
-                ActionResult::Joined => self.load_history(),
+                ActionResult::Joined => {}
                 ActionResult::Failed(reason) => self
                     .messages
                     .push(Self::system_message(format!("Action failed: {reason}"))),
