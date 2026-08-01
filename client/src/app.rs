@@ -148,6 +148,8 @@ pub struct App {
     loading_older: bool,
     /// Whether the server has more older messages available.
     has_more_history: bool,
+    /// Whether the user scrolled up in the message list (triggers auto-load at top).
+    has_scrolled_up: bool,
     /// Monotonically increasing counter for system message ids.
     system_message_id: u64,
 }
