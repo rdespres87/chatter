@@ -1172,16 +1172,20 @@ impl App {
                 sender_text.as_str(), sender_font, text_color.gamma_multiply(0.6));
         }
 
-        // Content (second line, or first if own message)
+        // Content (second line, or first if own message) — rendered via galley
+        // to properly display wrapped text across multiple lines.
         let content_y = text_origin.y + sender_row_height;
-        painter.text(
-            egui::pos2(text_origin.x, content_y),
-            egui::Align2::LEFT_TOP,
-            &content_str, content_font, text_color);
+        painter.galley(egui::pos2(text_origin.x, content_y), content_galley.clone(), text_color);
 
-        // Timestamp to the right of content, same line
-        let timestamp_x = text_origin.x + content_unwrapped_width + 12.0;
-        let timestamp_y = content_y;
+        // Timestamp to the right of content.
+        // For multi-line content, position after the last line's bottom-right.
+        // For single-line content, position on the same line after the text.
+        let timestamp_x = text_origin.x + content_galley.rect.right() + 12.0;
+        let timestamp_y = if content_galley.rows.len() > 1 {
+            text_origin.y + sender_row_height + content_galley.rect.height()
+        } else {
+            content_y
+        };
         painter.text(
             egui::pos2(timestamp_x, timestamp_y),
             egui::Align2::LEFT_TOP,
