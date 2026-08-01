@@ -1148,7 +1148,14 @@ impl App {
 
         // Hauteur: sender + contenu (avec wrapping) — only if sender is displayed
         let sender_row_height = if is_own { 0.0 } else { sender_size.y + 4.0 };
-        let total_height = sender_row_height + content_size.y + padding * 2.0;
+        // A multi-line message places its timestamp beneath the content, so
+        // reserve a full timestamp row in addition to the wrapped content.
+        let timestamp_row_height = if content_galley.rows.len() > 1 {
+            timestamp_galley.size().y
+        } else {
+            0.0
+        };
+        let total_height = sender_row_height + content_size.y + timestamp_row_height + padding * 2.0;
 
         // Largeur: bubble = wrapped content + padding + timestamp, clamped between
         // minimum (content alone) and maximum (full available width).
