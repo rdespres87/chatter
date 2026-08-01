@@ -961,9 +961,10 @@ impl App {
             let edit = egui::TextEdit::singleline(&mut self.input)
                 .hint_text("Write a message...")
                 .text_color(egui::Color32::from_rgb(233, 237, 239))
+                .font(egui::FontId::new(14.0, egui::FontFamily::Proportional))
                 .desired_width(input_width)
                 .frame(egui::Frame::NONE);
-            let response = ui.add(edit);
+            let response = ui.add_sized([input_width, 36.0], edit);
 
             // Enter submits message when textedit loses focus and Enter is pressed
             if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -1011,7 +1012,7 @@ impl App {
         // main chat area. No need for another panel — draw directly.
         {
             let available = ui.available_rect_before_wrap();
-            let input_bar_height: f32 = 46.0;
+            let input_bar_height: f32 = 52.0;
             let chat_area_height = available.height() - input_bar_height - 4.0;
 
             // Detect scroll-up intent (user scrolled toward older messages).
@@ -1020,9 +1021,11 @@ impl App {
                 self.has_scrolled_up = true;
             }
 
-            // Scrollable message area — shrink to content, cap at chat_area_height
+            // Scrollable message area fills the space reserved above the composer.
             let scroll_area_output = egui::ScrollArea::vertical()
-                .auto_shrink([true; 2])
+                // Fill the reserved message area so the composer remains at
+                // the bottom of the main UI even with only a few messages.
+                .auto_shrink([false; 2])
                 .max_height(chat_area_height)
                 .stick_to_bottom(!self.loading_older)
                 .id_salt("message_scroll")
