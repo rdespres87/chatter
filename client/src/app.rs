@@ -201,6 +201,7 @@ impl App {
             oldest_message_id: None,
             loading_older: false,
             has_more_history: false,
+            has_scrolled_up: false,
             system_message_id: 1000, // Start above normal message ids
         }
     }
