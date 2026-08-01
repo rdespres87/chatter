@@ -1027,7 +1027,9 @@ impl App {
                 .stick_to_bottom(!self.loading_older)
                 .id_salt("message_scroll")
                 .show(ui, |ui| {
-                    self.render_messages(ui);
+                    egui::Frame::new()
+                        .inner_margin(egui::Margin::symmetric(10, 0))
+                        .show(ui, |ui| self.render_messages(ui));
                 });
 
             // Auto-load when user scrolls to top of content.
