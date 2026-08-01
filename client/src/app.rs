@@ -1219,47 +1219,43 @@ impl App {
                             |dt| dt.naive_utc().date(),
                         );
 
-                    if let Some(last) = last_date {
-                        if msg_date != last {
-                            // Draw date separator
-                            let sep_label = format_date_separator(message.timestamp);
+                    if last_date != Some(msg_date) {
+                        // Draw date separator
+                        let sep_label = format_date_separator(message.timestamp);
 
-                            // Allocate space for separator — dynamic height based on content
-                            let text_font = egui::FontId::new(11.0, egui::FontFamily::Proportional);
-                            let galley = ui.painter().layout_no_wrap(sep_label.clone(), text_font.clone(), egui::Color32::from_rgb(140, 150, 165));
-                            // Height: text + gap + line + padding top/bottom
-                            let sep_height = galley.size().y + 16.0; // 16px padding total (8 top + 8 bottom)
+                        // Allocate space for separator — dynamic height based on content
+                        let text_font = egui::FontId::new(11.0, egui::FontFamily::Proportional);
+                        let galley = ui.painter().layout_no_wrap(sep_label.clone(), text_font.clone(), egui::Color32::from_rgb(140, 150, 165));
+                        // Height: text + gap + line + padding top/bottom
+                        let sep_height = galley.size().y + 16.0; // 16px padding total (8 top + 8 bottom)
 
-                            let (resp, painter) = ui.allocate_painter(
-                                egui::vec2(ui.available_width(), sep_height),
-                                egui::Sense::hover(),
-                            );
+                        let (resp, painter) = ui.allocate_painter(
+                            egui::vec2(ui.available_width(), sep_height),
+                            egui::Sense::hover(),
+                        );
 
-                            // Draw text above the line, centered horizontally
-                            let text_y = resp.rect.center().y - 4.0; // slightly above center
-                            painter.text(
-                                egui::pos2(resp.rect.center().x, text_y),
-                                egui::Align2::CENTER_CENTER,
-                                &sep_label,
-                                text_font,
-                                egui::Color32::from_rgb(140, 150, 165),
-                            );
+                        // Draw text above the line, centered horizontally
+                        let text_y = resp.rect.center().y - 4.0; // slightly above center
+                        painter.text(
+                            egui::pos2(resp.rect.center().x, text_y),
+                            egui::Align2::CENTER_CENTER,
+                            &sep_label,
+                            text_font,
+                            egui::Color32::from_rgb(140, 150, 165),
+                        );
 
-                            // Draw horizontal line below the text
-                            let line_y = text_y + galley.size().y / 2.0 + 4.0;
-                            painter.hline(
-                                (resp.rect.left() + 16.0)..=(resp.rect.right() - 16.0),
-                                line_y,
-                                (1.0, egui::Color32::from_rgb(60, 65, 75)),
-                            );
+                        // Draw horizontal line below the text
+                        let line_y = text_y + galley.size().y / 2.0 + 4.0;
+                        painter.hline(
+                            (resp.rect.left() + 16.0)..=(resp.rect.right() - 16.0),
+                            line_y,
+                            (1.0, egui::Color32::from_rgb(60, 65, 75)),
+                        );
 
-                            last_date = Some(msg_date);
-
-                            // Spacing after separator to separate from first message
-                            ui.add_space(8.0);
-                        }
-                    } else {
                         last_date = Some(msg_date);
+
+                        // Spacing after separator to separate from first message
+                        ui.add_space(8.0);
                     }
 
                     let is_own = message.is_own;
