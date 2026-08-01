@@ -1014,24 +1014,45 @@ impl App {
             let input_bar_height: f32 = 46.0;
             let chat_area_height = available.height() - input_bar_height - 4.0;
 
+            // Detect scroll-up intent (user scrolled toward older messages).
+            // Read smooth_scroll_delta BEFORE ScrollArea consumes it.
+            if ui.input(|i| i.smooth_scroll_delta().y > 0.0) {
+                self.has_scrolled_up = true;
+            }
+
             // Scrollable message area — shrink to content, cap at chat_area_height
-            egui::ScrollArea::vertical()
+            let scroll_area_output = egui::ScrollArea::vertical()
                 .auto_shrink([true; 2])
                 .max_height(chat_area_height)
                 .stick_to_bottom(!self.loading_older)
+                .id_salt("message_scroll")
                 .show(ui, |ui| {
                     self.render_messages(ui);
                 });
 
-            // "Load Older" button above input bar (only when has_more_history)
-            if self.has_more_history && !self.loading_older {
+            // Auto-load when user scrolls to top of content.
+            let content_height = scroll_area_output.content_size.y;
+            if self.has_scrolled_up
+                && content_height > chat_area_height + 2.0
+                && scroll_area_output.state.offset.y <= 2.0
+                && !self.loading_older
+                && self.has_more_history
+            {
+                self.load_older();
+            }
+
+            // Reset flag when user scrolls back down (reading new messages).
+            if scroll_area_output.state.offset.y > 10.0 {
+                self.has_scrolled_up = false;
+            }
+
+            // Loading indicator (spinner, no button needed).
+            if self.loading_older {
                 ui.add_space(2.0);
-                if ui.button("⬆ Load Older").clicked() {
-                    self.load_older();
-                }
-            } else if self.loading_older {
-                ui.add_space(2.0);
-                ui.label("Loading older messages...");
+                ui.horizontal_centered(|ui| {
+                    ui.spinner();
+                    ui.label("Loading older messages...");
+                });
             }
 
             // Input bar at bottom (outside scroll area)
