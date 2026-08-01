@@ -580,6 +580,7 @@ impl App {
         self.oldest_message_id = None;
         self.loading_older = false;
         self.has_more_history = false;
+        self.has_scrolled_up = false;
         // JoinRoom first so the server knows we're in the room, then GetHistory.
         self.pending_actions.push(PendingAction::JoinRoom { room: room.clone() });
         // Initial load: cursor=None means "give me the latest page".
