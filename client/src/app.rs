@@ -1134,9 +1134,6 @@ impl App {
 
         // Content: measure WITH wrapping to get the actual height
         let content_str = content.to_string();
-        let content_galley_no_wrap = ui.painter().layout_no_wrap(
-            content_str.clone(), content_font.clone(), text_color);
-        let content_unwrapped_width = content_galley_no_wrap.size().x;
 
         // Timestamp: measure first (needed to calculate wrap_width)
         let timestamp_galley = ui.painter().layout_no_wrap(
@@ -1153,9 +1150,12 @@ impl App {
         let sender_row_height = if is_own { 0.0 } else { sender_size.y + 4.0 };
         let total_height = sender_row_height + content_size.y + padding * 2.0;
 
-        // Largeur: sender, ou (contenu non-wrap + timestamp + espacement)
-        let content_and_ts_width = content_unwrapped_width + 12.0 + timestamp_width;
-        let max_width = sender_size.x.max(content_and_ts_width) + 4.0;
+        // Largeur: bubble = wrapped content + padding + timestamp, clamped between
+        // minimum (content alone) and maximum (full available width).
+        let content_and_ts_width = content_size.x + 12.0 + timestamp_width;
+        let min_bubble_width = sender_size.x.max(content_and_ts_width);
+        let max_bubble_width = ui.available_width() - 2.0 * padding;
+        let max_width = min_bubble_width.min(max_bubble_width);
 
         // Allouer l'espace + dessiner le fond
         let bubble_size = egui::Vec2::new(max_width + padding * 2.0, total_height);
