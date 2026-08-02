@@ -740,19 +740,28 @@ impl App {
             AuthMode::Login => "Login",
             AuthMode::Register => "Create account",
         };
+        // Handle Enter key to advance to password screen
+        let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        // Handle Escape to go back to splash
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.password_input.clear();
+            self.input_mode = InputMode::Splash;
+            return;
+        }
         egui::CentralPanel::default().show(ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(ui.available_height() * 0.3);
                 ui.heading(title);
                 ui.add_space(12.0);
-                ui.add(
+                let response = ui.add(
                     egui::TextEdit::singleline(&mut self.login_input)
                         .lock_focus(true)
                         .hint_text("Username")
                         .desired_width(260.0),
                 );
+                response.request_focus();
                 ui.add_space(12.0);
-                if ui.button("Submit").clicked() {
+                if enter_pressed || ui.button("Submit").clicked() {
                     self.input_mode = InputMode::EnteringPassword;
                 }
                 if ui.button("Cancel").clicked() {
@@ -762,20 +771,29 @@ impl App {
         });
     }
     fn render_entering_password(&mut self, ui: &mut egui::Ui) {
+        // Handle Enter key to submit credentials
+        let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        // Handle Escape to go back to splash
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.password_input.clear();
+            self.input_mode = InputMode::Splash;
+            return;
+        }
         egui::CentralPanel::default().show(ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(ui.available_height() * 0.3);
                 ui.heading("Password");
                 ui.add_space(12.0);
-                ui.add(
+                let response = ui.add(
                     egui::TextEdit::singleline(&mut self.password_input)
                         .password(true)
                         .lock_focus(true)
                         .hint_text("Password")
                         .desired_width(260.0),
                 );
+                response.request_focus();
                 ui.add_space(12.0);
-                if ui.button("Submit").clicked() {
+                if enter_pressed || ui.button("Submit").clicked() {
                     self.submit_credentials();
                 }
                 if ui.button("Cancel").clicked() {
@@ -956,20 +974,31 @@ impl App {
     fn render_input_bar(&mut self, ui: &mut egui::Ui) {
         let can_send = matches!(self.connection_state, ConnectionState::LoggedIn { .. });
         ui.horizontal(|ui| {
-            // Input field
+            // Input field - multiline (Enter=submit, Shift+Enter=newline)
             let input_width = ui.available_width() - 48.0;
-            let edit = egui::TextEdit::singleline(&mut self.input)
+
+            // Check Enter BEFORE TextEdit so we can consume it first
+            let enter_pressed = ui.input_mut(|i| i.key_pressed(egui::Key::Enter));
+            let shift_pressed = ui.input(|i| i.modifiers.shift);
+            if enter_pressed {
+                if shift_pressed {
+                    // Insert a newline character manually if Shift is held
+                    self.input.push('\n');
+                } else {
+                    // Submit message — key already consumed by input_mut above
+                    self.submit_message();
+                    return;
+                }
+            }
+
+            let edit = egui::TextEdit::multiline(&mut self.input)
                 .hint_text("Write a message...")
                 .text_color(egui::Color32::from_rgb(233, 237, 239))
                 .font(egui::FontId::new(14.0, egui::FontFamily::Proportional))
                 .desired_width(input_width)
+                .desired_rows(2)
                 .frame(egui::Frame::NONE);
-            let response = ui.add_sized([input_width, 36.0], edit);
-
-            // Enter submits message when textedit loses focus and Enter is pressed
-            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                self.submit_message();
-            }
+            let _response = ui.add_sized([input_width, 52.0], edit);
 
             // Send button - green circle
             let send_color = egui::Color32::from_rgb(0, 168, 132);
@@ -1304,53 +1333,6 @@ impl App {
         }
     }
 
-    fn handle_keys(&mut self, ctx: &egui::Context) {
-        let (enter, escape, tab) = ctx.input_mut(|input| {
-            (
-                input.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
-                input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
-                input.consume_key(egui::Modifiers::NONE, egui::Key::Tab),
-            )
-        });
-        if escape {
-            match self.input_mode {
-                InputMode::EnteringLogin | InputMode::EnteringPassword => {
-                    self.password_input.clear();
-                    self.input_mode = InputMode::Splash;
-                }
-                InputMode::Normal => self.input_mode = InputMode::Normal,
-                _ => {}
-            }
-            return;
-        }
-        if tab {
-            self.input_mode = match self.input_mode {
-                InputMode::EnteringLogin => InputMode::EnteringPassword,
-                InputMode::EnteringPassword => InputMode::EnteringLogin,
-                // In Normal/Editing, Tab cycles through rooms in sidebar
-                InputMode::Normal => {
-                    if !self.rooms.is_empty() {
-                        self.room_selected = (self.room_selected + 1) % self.rooms.len();
-                        self.room.clone_from(&self.rooms[self.room_selected]);
-                    }
-                    self.input_mode
-                }
-                mode => mode,
-            };
-            return;
-        }
-        if !enter {
-            return;
-        }
-        match self.input_mode {
-            InputMode::EnteringLogin => self.input_mode = InputMode::EnteringPassword,
-            InputMode::EnteringPassword => self.submit_credentials(),
-            // In Normal/Editing, Enter submits the message directly
-            InputMode::Normal => self.submit_message(),
-            _ => {}
-        }
-    }
-
     fn configure_theme(&mut self, ctx: &egui::Context) {
         if self.theme_configured {
             return;
@@ -1427,7 +1409,6 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.configure_theme(&ctx);
-        self.handle_keys(&ctx);
         match self.input_mode {
             InputMode::Splash => self.render_splash(ui),
             InputMode::EnteringLogin => self.render_entering_login(ui),
