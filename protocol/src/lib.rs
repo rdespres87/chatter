@@ -134,7 +134,7 @@ fn validate_required_text(value: &str, field: &str, max_len: usize) -> Result<()
 }
 
 fn validate_no_control_chars(value: &str, field: &str) -> Result<()> {
-    if value.chars().any(char::is_control) {
+    if value.chars().any(|c| c.is_control() && c != '\n' && c != '\r') {
         bail!("{field} cannot contain control characters");
     }
     Ok(())
@@ -662,6 +662,12 @@ mod tests {
     fn validate_message_rejects_control_characters() {
         assert!(validate_message("hello\u{1b}[2J").is_err());
         assert!(validate_message("hello\u{7}").is_err());
+    }
+
+    #[test]
+    fn validate_message_accepts_newlines() {
+        assert!(validate_message("hello\nworld").is_ok());
+        assert!(validate_message("line1\r\nline2").is_ok());
     }
 
     #[test]
