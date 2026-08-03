@@ -335,7 +335,8 @@ impl App {
                     // Build initial login message to send AFTER reader starts.
                     // Always try to login on reconnect if we have credentials,
                     // even when prev_input_mode is Splash or EnteringLogin.
-                    let initial_msg = if let (Some(l), Some(p)) = (login.as_ref(), password.as_ref())
+                    let initial_msg = if let (Some(l), Some(p)) =
+                        (login.as_ref(), password.as_ref())
                         && !l.is_empty()
                         && !p.is_empty()
                     {
@@ -378,7 +379,8 @@ impl App {
                 self.input_mode = InputMode::Normal;
                 let id = self.system_message_id;
                 self.system_message_id += 1;
-                self.messages.insert(id, Self::system_message("Login successful.".into()));
+                self.messages
+                    .insert(id, Self::system_message("Login successful.".into()));
                 self.join_room(String::new(), "general".into());
             }
             ServerMessage::LoginFailed { reason } => {
@@ -396,9 +398,10 @@ impl App {
                 self.input_mode = InputMode::EnteringLogin;
                 let id = self.system_message_id;
                 self.system_message_id += 1;
-                self.messages.insert(id, Self::system_message(
-                    "Account created. Please login.".into(),
-                ));
+                self.messages.insert(
+                    id,
+                    Self::system_message("Account created. Please login.".into()),
+                );
             }
             ServerMessage::AccountCreationFailed { reason } => {
                 self.password_input.clear();
@@ -417,24 +420,32 @@ impl App {
                 if *login == "Server" && room == "system" {
                     let sys_id = self.system_message_id;
                     self.system_message_id += 1;
-                    self.messages.insert(sys_id, Self::system_message(message.clone()));
+                    self.messages
+                        .insert(sys_id, Self::system_message(message.clone()));
                 } else if room == &self.room {
                     // BTreeMap insert is idempotent: same id overwrites (dedup by design)
-                    self.messages.insert(id, MessageEntry {
+                    self.messages.insert(
                         id,
-                        sender: resolve_sender(&self.login, login),
-                        content: message.clone(),
-                        timestamp,
-                        is_own: login == &self.login,
-                        msg_type: MessageType::Chat,
-                    });
+                        MessageEntry {
+                            id,
+                            sender: resolve_sender(&self.login, login),
+                            content: message.clone(),
+                            timestamp,
+                            is_own: login == &self.login,
+                            msg_type: MessageType::Chat,
+                        },
+                    );
                 }
             }
             ServerMessage::RoomList { rooms } => {
                 self.rooms = rooms;
                 self.room_selected = self.rooms.iter().position(|r| r == &self.room).unwrap_or(0);
             }
-            ServerMessage::RoomHistory { room, messages, has_more } => {
+            ServerMessage::RoomHistory {
+                room,
+                messages,
+                has_more,
+            } => {
                 // If this RoomHistory is for a room we're no longer in, ignore it.
                 if self.room == room {
                     // Track oldest message id for next cursor
@@ -444,16 +455,17 @@ impl App {
                         // Prepend older messages (loading history before current window)
                         // Messages come from server in reverse-chronological order,
                         // reverse to chronological for BTreeMap insertion.
-                        let older: Vec<MessageEntry> = messages.into_iter().map(|entry| {
-                            MessageEntry {
+                        let older: Vec<MessageEntry> = messages
+                            .into_iter()
+                            .map(|entry| MessageEntry {
                                 id: entry.id,
                                 sender: resolve_sender(&self.login, &entry.login),
                                 content: entry.message,
                                 timestamp: entry.timestamp,
                                 is_own: entry.login == self.login,
                                 msg_type: MessageType::Chat,
-                            }
-                        }).collect();
+                            })
+                            .collect();
 
                         // Insert in reverse order so BTreeMap gets them sorted
                         for msg in older.into_iter().rev() {
@@ -470,22 +482,29 @@ impl App {
                         // Initialize room if empty (reconnect edge case).
                         if self.room.is_empty() {
                             self.room = room.clone();
-                            self.room_selected = self.rooms.iter().position(|r| r == &self.room).unwrap_or(0);
+                            self.room_selected =
+                                self.rooms.iter().position(|r| r == &self.room).unwrap_or(0);
                         }
                         for entry in messages {
-                            self.messages.insert(entry.id, MessageEntry {
-                                id: entry.id,
-                                sender: resolve_sender(&self.login, &entry.login),
-                                content: entry.message,
-                                timestamp: entry.timestamp,
-                                is_own: entry.login == self.login,
-                                msg_type: MessageType::Chat,
-                            });
+                            self.messages.insert(
+                                entry.id,
+                                MessageEntry {
+                                    id: entry.id,
+                                    sender: resolve_sender(&self.login, &entry.login),
+                                    content: entry.message,
+                                    timestamp: entry.timestamp,
+                                    is_own: entry.login == self.login,
+                                    msg_type: MessageType::Chat,
+                                },
+                            );
                         }
                         // Push system message AFTER history so it appears at the bottom.
                         let join_id = self.system_message_id;
                         self.system_message_id += 1;
-                        self.messages.insert(join_id, Self::system_message(format!("Joined room '{}'", room)));
+                        self.messages.insert(
+                            join_id,
+                            Self::system_message(format!("Joined room '{}'", room)),
+                        );
                     }
 
                     // Store has_more for the "Load Older" button
@@ -499,14 +518,18 @@ impl App {
                 }
                 let id = self.system_message_id;
                 self.system_message_id += 1;
-                self.messages.insert(id, Self::system_message(format!("[{code}] {message}")));
+                self.messages
+                    .insert(id, Self::system_message(format!("[{code}] {message}")));
             }
         }
         // Keep only the most recent MAX_HISTORY messages (by id).
         if self.messages.len() > MAX_HISTORY {
-            let ids_to_remove: Vec<u64> = self.messages.keys().copied().take(
-                self.messages.len() - MAX_HISTORY
-            ).collect();
+            let ids_to_remove: Vec<u64> = self
+                .messages
+                .keys()
+                .copied()
+                .take(self.messages.len() - MAX_HISTORY)
+                .collect();
             for id in ids_to_remove {
                 self.messages.remove(&id);
             }
@@ -521,20 +544,26 @@ impl App {
         self.reconnect_pending = true;
         let id = self.system_message_id;
         self.system_message_id += 1;
-        self.messages.insert(id, Self::system_message(
-            format!(
-                "Disconnected{}",
-                close_code
-                    .map(|c| format!(" (code {c})"))
-                    .unwrap_or_default()
-            ) + &close_reason.map(|r| format!(": {r}")).unwrap_or_default(),
-        ));
+        self.messages.insert(
+            id,
+            Self::system_message(
+                format!(
+                    "Disconnected{}",
+                    close_code
+                        .map(|c| format!(" (code {c})"))
+                        .unwrap_or_default()
+                ) + &close_reason.map(|r| format!(": {r}")).unwrap_or_default(),
+            ),
+        );
         self.start_reconnect();
     }
     fn handle_connection_error(&mut self, reason: String) {
         let id = self.system_message_id;
         self.system_message_id += 1;
-        self.messages.insert(id, Self::system_message(format!("Connection error: {reason}")));
+        self.messages.insert(
+            id,
+            Self::system_message(format!("Connection error: {reason}")),
+        );
         self.handle_disconnect(None, None);
     }
     fn start_reconnect(&mut self) {
@@ -571,7 +600,8 @@ impl App {
     }
     fn join_room(&mut self, old_room: String, room: String) {
         if !old_room.is_empty() && old_room != room {
-            self.pending_actions.push(PendingAction::LeaveRoom { room: old_room });
+            self.pending_actions
+                .push(PendingAction::LeaveRoom { room: old_room });
         }
         self.room = room.clone();
         self.input_mode = InputMode::Normal;
@@ -582,9 +612,11 @@ impl App {
         self.has_more_history = false;
         self.has_scrolled_up = false;
         // JoinRoom first so the server knows we're in the room, then GetHistory.
-        self.pending_actions.push(PendingAction::JoinRoom { room: room.clone() });
+        self.pending_actions
+            .push(PendingAction::JoinRoom { room: room.clone() });
         // Initial load: cursor=None means "give me the latest page".
-        self.pending_actions.push(PendingAction::GetHistory { room, cursor: None });
+        self.pending_actions
+            .push(PendingAction::GetHistory { room, cursor: None });
     }
     /// Queue a request for older messages (cursor-based pagination).
     fn load_older(&mut self) {
@@ -594,13 +626,15 @@ impl App {
         self.loading_older = true;
         let room = self.room.clone();
         let cursor = self.oldest_message_id;
-        self.pending_actions.push(PendingAction::GetHistory { room, cursor });
+        self.pending_actions
+            .push(PendingAction::GetHistory { room, cursor });
     }
     fn reset_room_on_disconnect(&mut self) {
         // If we were in a room, leave it before resetting (matches ratatui reconnect behavior).
         let prev_room = std::mem::replace(&mut self.room, String::new());
         if !prev_room.is_empty() {
-            self.pending_actions.push(PendingAction::LeaveRoom { room: prev_room });
+            self.pending_actions
+                .push(PendingAction::LeaveRoom { room: prev_room });
         }
         self.room_selected = 0;
     }
@@ -624,9 +658,10 @@ impl App {
         if self.login_input.trim().is_empty() || self.password_input.is_empty() {
             let id = self.system_message_id;
             self.system_message_id += 1;
-            self.messages.insert(id, Self::system_message(
-                "Login and password are required.".into(),
-            ));
+            self.messages.insert(
+                id,
+                Self::system_message("Login and password are required.".into()),
+            );
             return;
         }
         let login = self.login_input.trim().to_owned();
@@ -651,14 +686,17 @@ impl App {
             .unwrap_or(0);
         let id = self.system_message_id;
         self.system_message_id += 1;
-        self.messages.insert(id, MessageEntry {
-            id: id, // local echo placeholder; server will confirm with real id
-            sender: resolve_sender(&self.login, &self.login),
-            content: message.clone(),
-            timestamp: now,
-            is_own: true,
-            msg_type: MessageType::Chat,
-        });
+        self.messages.insert(
+            id,
+            MessageEntry {
+                id: id, // local echo placeholder; server will confirm with real id
+                sender: resolve_sender(&self.login, &self.login),
+                content: message.clone(),
+                timestamp: now,
+                is_own: true,
+                msg_type: MessageType::Chat,
+            },
+        );
         self.input.clear();
         self.input_mode = InputMode::Normal;
         self.queue_action(PendingAction::SendMessage {
@@ -695,7 +733,9 @@ impl App {
                 }
                 PendingAction::JoinRoom { room } => (ClientMessage::JoinRoom { room }, true),
                 PendingAction::LeaveRoom { room } => (ClientMessage::LeaveRoom { room }, false),
-                PendingAction::GetHistory { room, cursor } => (ClientMessage::GetHistory { room, cursor }, false),
+                PendingAction::GetHistory { room, cursor } => {
+                    (ClientMessage::GetHistory { room, cursor }, false)
+                }
             };
             let result = async {
                 let json = chatter_protocol::serialize_client_message(&message)
@@ -805,10 +845,8 @@ impl App {
     fn render_sidebar_header(&mut self, ui: &mut egui::Ui) {
         let avatar_size = 32.0;
         // Allocate space for the avatar circle
-        let (_response, rect) = ui.allocate_exact_size(
-            egui::vec2(avatar_size, avatar_size),
-            egui::Sense::hover(),
-        );
+        let (_response, rect) =
+            ui.allocate_exact_size(egui::vec2(avatar_size, avatar_size), egui::Sense::hover());
         // Paint green circle avatar centered in allocated space
         let center = rect.rect.center();
         ui.painter().circle_filled(
@@ -817,8 +855,19 @@ impl App {
             egui::Color32::from_rgb(0, 168, 132),
         );
         // Draw first letter of login in the avatar
-        let letter = self.login.chars().next().map(|c| c.to_ascii_uppercase().to_string()).unwrap_or_else(|| "U".to_string());
-        let text_size = ui.fonts_mut(|f| f.layout_no_wrap(letter.clone(), egui::FontId::proportional(14.0), egui::Color32::WHITE));
+        let letter = self
+            .login
+            .chars()
+            .next()
+            .map(|c| c.to_ascii_uppercase().to_string())
+            .unwrap_or_else(|| "U".to_string());
+        let text_size = ui.fonts_mut(|f| {
+            f.layout_no_wrap(
+                letter.clone(),
+                egui::FontId::proportional(14.0),
+                egui::Color32::WHITE,
+            )
+        });
         let text_pos = egui::Pos2::new(
             center.x - text_size.size().x / 2.0,
             center.y - text_size.size().y / 2.0,
@@ -846,7 +895,8 @@ impl App {
             self.messages.clear();
             let id = self.system_message_id;
             self.system_message_id += 1;
-            self.messages.insert(id, Self::system_message("Connecting to server...".into()));
+            self.messages
+                .insert(id, Self::system_message("Connecting to server...".into()));
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
@@ -859,17 +909,16 @@ impl App {
                 self.messages.clear();
                 let id = self.system_message_id;
                 self.system_message_id += 1;
-                self.messages.insert(id, Self::system_message("Connecting to server...".into()));
+                self.messages
+                    .insert(id, Self::system_message("Connecting to server...".into()));
             }
         });
     }
 
     fn render_room_list(&mut self, ui: &mut egui::Ui) {
         // Background sidebar WhatsApp
-        ui.painter().rect_filled(
-            ui.max_rect(), 0.0,
-            egui::Color32::from_rgb(32, 44, 51),
-        );
+        ui.painter()
+            .rect_filled(ui.max_rect(), 0.0, egui::Color32::from_rgb(32, 44, 51));
 
         // Sidebar header (avatar + name + logout)
         self.render_sidebar_header(ui);
@@ -899,10 +948,8 @@ impl App {
                     if resp.clicked() {
                         self.room_selected = index;
                         // Only join if already logged in; otherwise just track selection
-                        let was_logged_in = matches!(
-                            self.connection_state,
-                            ConnectionState::LoggedIn { .. }
-                        );
+                        let was_logged_in =
+                            matches!(self.connection_state, ConnectionState::LoggedIn { .. });
                         if was_logged_in && room != &self.room {
                             let old_room = self.room.clone();
                             self.room.clone_from(room);
@@ -918,7 +965,8 @@ impl App {
                     } else {
                         egui::Color32::from_rgb(233, 237, 239)
                     };
-                    let room_name_pos = egui::Pos2::new(resp.rect.min.x + 8.0, resp.rect.min.y + 4.0);
+                    let room_name_pos =
+                        egui::Pos2::new(resp.rect.min.x + 8.0, resp.rect.min.y + 4.0);
                     painter.text(
                         room_name_pos,
                         egui::Align2::LEFT_TOP,
@@ -941,63 +989,61 @@ impl App {
                     .strong()
                     .color(egui::Color32::from_rgb(233, 237, 239)),
             );
-            ui.with_layout(
-                egui::Layout::right_to_left(egui::Align::TOP),
-                |ui| {
-                    let status_color = match &self.connection_state {
-                        ConnectionState::Connected
-                        | ConnectionState::LoggedIn { .. } => {
-                            egui::Color32::from_rgb(0, 168, 132)
-                        }
-                        ConnectionState::Connecting => egui::Color32::from_rgb(200, 180, 0),
-                        ConnectionState::Disconnected => egui::Color32::from_rgb(200, 60, 60),
-                    };
-                    let status_text = match &self.connection_state {
-                        ConnectionState::Connected => "Connected",
-                        ConnectionState::LoggedIn { login } => {
-                            Box::leak(format!("Connected as {}", login).into_boxed_str())
-                        }
-                        ConnectionState::Connecting => "Connecting...",
-                        ConnectionState::Disconnected => "Disconnected",
-                    };
-                    ui.label(
-                        egui::RichText::new(status_text)
-                            .size(12.0)
-                            .color(status_color),
-                    );
-                },
-            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                let status_color = match &self.connection_state {
+                    ConnectionState::Connected | ConnectionState::LoggedIn { .. } => {
+                        egui::Color32::from_rgb(0, 168, 132)
+                    }
+                    ConnectionState::Connecting => egui::Color32::from_rgb(200, 180, 0),
+                    ConnectionState::Disconnected => egui::Color32::from_rgb(200, 60, 60),
+                };
+                let status_text = match &self.connection_state {
+                    ConnectionState::Connected => "Connected",
+                    ConnectionState::LoggedIn { login } => {
+                        Box::leak(format!("Connected as {}", login).into_boxed_str())
+                    }
+                    ConnectionState::Connecting => "Connecting...",
+                    ConnectionState::Disconnected => "Disconnected",
+                };
+                ui.label(
+                    egui::RichText::new(status_text)
+                        .size(12.0)
+                        .color(status_color),
+                );
+            });
         });
     }
 
     fn render_input_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            // Input field - multiline (Enter=submit, Shift+Enter=newline)
-            let input_width = ui.available_width() - 48.0;
-
-            // Check Enter BEFORE TextEdit so we can consume it first
-            let enter_pressed = ui.input_mut(|i| i.key_pressed(egui::Key::Enter));
-            let shift_pressed = ui.input(|i| i.modifiers.shift);
-            if enter_pressed {
-                if shift_pressed {
-                    // Insert a newline character manually if Shift is held
-                    self.input.push('\n');
-                } else {
-                    // Submit message — key already consumed by input_mut above
-                    self.submit_message();
-                    return;
-                }
-            }
-
-            let edit = egui::TextEdit::multiline(&mut self.input)
-                .hint_text("Write a message...")
-                .text_color(egui::Color32::from_rgb(233, 237, 239))
-                .font(egui::FontId::new(14.0, egui::FontFamily::Proportional))
-                .desired_width(input_width)
-                .desired_rows(2)
-                .frame(egui::Frame::NONE);
-            let _response = ui.add_sized([input_width, 52.0], edit);
-        });
+        // Check Enter BEFORE TextEdit so we can consume it first
+        let enter_pressed = ui.input_mut(|i| i.key_pressed(egui::Key::Enter));
+        let shift_pressed = ui.input(|i| i.modifiers.shift);
+        if enter_pressed && !shift_pressed {
+            ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+            self.submit_message();
+        }
+        // Bubble frame — use Frame::menu for proper layout constraints with
+        // 4px outer padding (visual breathing room + keeps frame within 64px),
+        // 12 left/right inner for comfortable input spacing.
+        egui::Frame::menu(ui.style())
+            .corner_radius(12.0)
+            .outer_margin(egui::Margin::same(4))
+            .inner_margin(egui::Margin { left: 12, right: 12, top: 4, bottom: 4 })
+            .show(ui, |ui| {
+                let input_width = ui.available_width();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |scroll_ui| {
+                        let edit = egui::TextEdit::multiline(&mut self.input)
+                            .hint_text("Write a message...")
+                            .text_color(egui::Color32::from_rgb(233, 237, 239))
+                            .font(egui::FontId::new(14.0, egui::FontFamily::Proportional))
+                            .desired_width(input_width)
+                            .desired_rows(2)
+                            .frame(egui::Frame::NONE);
+                        scroll_ui.add(edit);
+                    });
+            });
     }
 
     fn render_normal(&mut self, ui: &mut egui::Ui) {
@@ -1021,8 +1067,12 @@ impl App {
         // main chat area. No need for another panel — draw directly.
         {
             let available = ui.available_rect_before_wrap();
-            let input_bar_height: f32 = 52.0;
-            let chat_area_height = available.height() - input_bar_height - 4.0;
+            // Input bar now has zero frame padding, so the full reserved height is used.
+            let input_bar_height: f32 = 64.0;
+            // Panel::top("chat_header") renders in a separate layer and does NOT
+            // reduce available_rect_before_wrap(), so we must subtract its 40px
+            // height manually to avoid a 40px overflow at the bottom.
+            let chat_area_height = (available.height() - 40.0 - input_bar_height - 4.0).max(80.0);
 
             // Detect scroll-up intent (user scrolled toward older messages).
             // Read smooth_scroll_delta BEFORE ScrollArea consumes it.
@@ -1081,12 +1131,8 @@ impl App {
                 ui.heading(egui::RichText::new("Disconnected").color(egui::Color32::RED));
                 ui.add_space(8.0);
                 let status_text = match &self.connection_state {
-                    ConnectionState::Disconnected => {
-                        "The server connection was lost."
-                    }
-                    ConnectionState::Connecting => {
-                        "Reconnecting..."
-                    }
+                    ConnectionState::Disconnected => "The server connection was lost.",
+                    ConnectionState::Connecting => "Reconnecting...",
                     _ => "The server connection was lost.",
                 };
                 ui.label(status_text);
@@ -1114,12 +1160,32 @@ impl App {
         if align_right {
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                    Self::render_bubble_inner(ui, sender, content, time_str, text_color, bubble_color, corner_radius, padding, is_own);
+                    Self::render_bubble_inner(
+                        ui,
+                        sender,
+                        content,
+                        time_str,
+                        text_color,
+                        bubble_color,
+                        corner_radius,
+                        padding,
+                        is_own,
+                    );
                 });
             });
         } else {
             ui.horizontal(|ui| {
-                Self::render_bubble_inner(ui, sender, content, time_str, text_color, bubble_color, corner_radius, padding, is_own);
+                Self::render_bubble_inner(
+                    ui,
+                    sender,
+                    content,
+                    time_str,
+                    text_color,
+                    bubble_color,
+                    corner_radius,
+                    padding,
+                    is_own,
+                );
             });
         }
     }
@@ -1136,14 +1202,22 @@ impl App {
         is_own: bool,
     ) {
         let sender_font = egui::FontId::new(THEME_FONT_SENDER_SIZE, egui::FontFamily::Proportional);
-        let content_font = egui::FontId::new(THEME_FONT_CONTENT_SIZE, egui::FontFamily::Proportional);
+        let content_font =
+            egui::FontId::new(THEME_FONT_CONTENT_SIZE, egui::FontFamily::Proportional);
         let timestamp_font = egui::FontId::new(10.0, egui::FontFamily::Proportional);
 
-        let sender_text = if is_own { String::new() } else { sender.to_string() };
+        let sender_text = if is_own {
+            String::new()
+        } else {
+            sender.to_string()
+        };
 
         // Sender: pas de wrapping (toujours une ligne)
         let sender_galley = ui.painter().layout_no_wrap(
-            sender_text.clone(), sender_font.clone(), text_color.gamma_multiply(0.6));
+            sender_text.clone(),
+            sender_font.clone(),
+            text_color.gamma_multiply(0.6),
+        );
         let sender_size = sender_galley.size();
 
         // Content: measure WITH wrapping to get the actual height
@@ -1151,13 +1225,20 @@ impl App {
 
         // Timestamp: measure first (needed to calculate wrap_width)
         let timestamp_galley = ui.painter().layout_no_wrap(
-            time_str.to_string(), timestamp_font.clone(), text_color.gamma_multiply(0.45));
+            time_str.to_string(),
+            timestamp_font.clone(),
+            text_color.gamma_multiply(0.45),
+        );
         let timestamp_width = timestamp_galley.size().x;
 
         // Wrap width based on actual available space
         let wrap_width = (ui.available_width() - 2.0 * padding - timestamp_width).max(50.0);
         let content_galley = ui.painter().layout(
-            content_str.clone(), content_font.clone(), text_color, wrap_width);
+            content_str.clone(),
+            content_font.clone(),
+            text_color,
+            wrap_width,
+        );
         let content_size = content_galley.size();
 
         // Hauteur: sender + contenu (avec wrapping) — only if sender is displayed
@@ -1169,7 +1250,8 @@ impl App {
         } else {
             0.0
         };
-        let total_height = sender_row_height + content_size.y + timestamp_row_height + padding * 2.0;
+        let total_height =
+            sender_row_height + content_size.y + timestamp_row_height + padding * 2.0;
 
         // Largeur: bubble = wrapped content + padding + timestamp, clamped between
         // minimum (content alone) and maximum (full available width).
@@ -1189,14 +1271,22 @@ impl App {
         // Sender (first line, only if not own message)
         if !is_own {
             painter.text(
-                text_origin, egui::Align2::LEFT_TOP,
-                sender_text.as_str(), sender_font, text_color.gamma_multiply(0.6));
+                text_origin,
+                egui::Align2::LEFT_TOP,
+                sender_text.as_str(),
+                sender_font,
+                text_color.gamma_multiply(0.6),
+            );
         }
 
         // Content (second line, or first if own message) — rendered via galley
         // to properly display wrapped text across multiple lines.
         let content_y = text_origin.y + sender_row_height;
-        painter.galley(egui::pos2(text_origin.x, content_y), content_galley.clone(), text_color);
+        painter.galley(
+            egui::pos2(text_origin.x, content_y),
+            content_galley.clone(),
+            text_color,
+        );
 
         // Timestamp to the right of content.
         // For multi-line content, position after the last line's bottom-right.
@@ -1210,7 +1300,10 @@ impl App {
         painter.text(
             egui::pos2(timestamp_x, timestamp_y),
             egui::Align2::LEFT_TOP,
-            time_str, timestamp_font, text_color.gamma_multiply(0.45));
+            time_str,
+            timestamp_font,
+            text_color.gamma_multiply(0.45),
+        );
     }
 
     fn render_messages(&self, ui: &mut egui::Ui) {
@@ -1250,7 +1343,11 @@ impl App {
 
                         // Allocate space for separator — dynamic height based on content
                         let text_font = egui::FontId::new(11.0, egui::FontFamily::Proportional);
-                        let galley = ui.painter().layout_no_wrap(sep_label.clone(), text_font.clone(), egui::Color32::from_rgb(140, 150, 165));
+                        let galley = ui.painter().layout_no_wrap(
+                            sep_label.clone(),
+                            text_font.clone(),
+                            egui::Color32::from_rgb(140, 150, 165),
+                        );
                         // Height: text + gap + line + padding top/bottom
                         let sep_height = galley.size().y + 16.0; // 16px padding total (8 top + 8 bottom)
 
@@ -1292,7 +1389,7 @@ impl App {
                     let text_color = if is_own {
                         THEME_TEXT_OWN
                     } else {
-                            THEME_TEXT_OTHER
+                        THEME_TEXT_OTHER
                     };
                     let time_str = format_timestamp_bubble(message.timestamp);
 
@@ -1360,7 +1457,8 @@ impl App {
             self.connection_state = ConnectionState::Connected;
             let id = self.system_message_id;
             self.system_message_id += 1;
-            self.messages.insert(id, Self::system_message("Connection established.".into()));
+            self.messages
+                .insert(id, Self::system_message("Connection established.".into()));
         }
         self.run_pending_action();
         while let Ok(result) = self.action_rx.try_recv() {
@@ -1370,7 +1468,8 @@ impl App {
                 ActionResult::Failed(reason) => {
                     let id = self.system_message_id;
                     self.system_message_id += 1;
-                    self.messages.insert(id, Self::system_message(format!("Action failed: {reason}")));
+                    self.messages
+                        .insert(id, Self::system_message(format!("Action failed: {reason}")));
                 }
             }
         }
