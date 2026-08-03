@@ -605,7 +605,6 @@ impl App {
         self.room_selected = 0;
     }
 
-
     fn system_message(content: String) -> MessageEntry {
         MessageEntry {
             id: 0,
@@ -972,7 +971,6 @@ impl App {
     }
 
     fn render_input_bar(&mut self, ui: &mut egui::Ui) {
-        let can_send = matches!(self.connection_state, ConnectionState::LoggedIn { .. });
         ui.horizontal(|ui| {
             // Input field - multiline (Enter=submit, Shift+Enter=newline)
             let input_width = ui.available_width() - 48.0;
@@ -999,24 +997,6 @@ impl App {
                 .desired_rows(2)
                 .frame(egui::Frame::NONE);
             let _response = ui.add_sized([input_width, 52.0], edit);
-
-            // Send button - green circle
-            let send_color = egui::Color32::from_rgb(0, 168, 132);
-            let send_btn = egui::Button::new(egui::RichText::new("➤").size(14.0))
-                .small()
-                .frame(false);
-            let send_response = ui.add(send_btn);
-            if can_send {
-                let btn_rect = send_response.rect;
-                ui.painter().circle_filled(
-                    btn_rect.center(),
-                    btn_rect.width() / 2.0,
-                    send_color,
-                );
-            }
-            if send_response.clicked() && can_send {
-                self.submit_message();
-            }
         });
     }
 
