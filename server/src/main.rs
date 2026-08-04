@@ -663,25 +663,16 @@ fn set_authenticated_peer(
 ) -> std::result::Result<Option<(String, Vec<String>)>, chatter_protocol::ServerMessage> {
     let mut peers = peer_map.write().map_err(|_| lock_peer_error())?;
 
-    // If this login is already used by a different peer, kick the old one
-    let old_addr = peers
+    // Reject duplicate logins: if another peer already uses this login, refuse.
+    if let Some(old_addr) = peers
         .iter()
         .find(|(_, peer)| peer.login == login && peer.login != RESERVED_ANONYMOUS_LOGIN)
-        .map(|(k, _)| *k);
-
-    if let Some(kick_addr) = old_addr {
-        if kick_addr != addr {
-            // Remove the old peer entry and announce departures
-            if let Some(old_peer) = peers.remove(&kick_addr) {
-                announce_room_departures(
-                    peer_map,
-                    &kick_addr,
-                    &old_peer.login,
-                    old_peer.rooms.iter().cloned().collect(),
-                );
-                // Close the old connection by dropping the tx
-                drop(old_peer.tx);
-            }
+        .map(|(k, _)| *k)
+    {
+        if old_addr != addr {
+            return Err(chatter_protocol::ServerMessage::LoginFailed {
+                reason: "Login already in use. Please try again.".to_string(),
+            });
         }
     }
 
@@ -690,11 +681,12 @@ fn set_authenticated_peer(
     let old_rooms = peer.rooms.iter().cloned().collect::<Vec<_>>();
     peer.login = login;
     peer.rooms.clear();
-    if old_login != RESERVED_ANONYMOUS_LOGIN && !old_rooms.is_empty() {
-        Ok(Some((old_login, old_rooms)))
+
+    Ok(if old_login != RESERVED_ANONYMOUS_LOGIN && !old_rooms.is_empty() {
+        Some((old_login, old_rooms))
     } else {
-        Ok(None)
-    }
+        None
+    })
 }
 
 fn clear_peer_authentication(
