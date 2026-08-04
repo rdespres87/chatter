@@ -864,68 +864,80 @@ impl App {
     }
     fn render_sidebar_header(&mut self, ui: &mut egui::Ui) {
         let avatar_size = 32.0;
-        // Allocate space for the avatar circle
-        let (_response, rect) =
-            ui.allocate_exact_size(egui::vec2(avatar_size, avatar_size), egui::Sense::hover());
-        // Paint green circle avatar centered in allocated space
-        let center = rect.rect.center();
-        ui.painter().circle_filled(
-            center,
-            avatar_size / 2.0,
-            egui::Color32::from_rgb(0, 168, 132),
-        );
-        // Draw first letter of login in the avatar
-        let letter = self
-            .login
-            .chars()
-            .next()
-            .map(|c| c.to_ascii_uppercase().to_string())
-            .unwrap_or_else(|| "U".to_string());
-        let text_size = ui.fonts_mut(|f| {
-            f.layout_no_wrap(
-                letter.clone(),
+
+        // Top margin + left indent (16px each)
+        ui.add_space(16.0);
+        ui.horizontal(|ui| {
+            // Left margin for avatar
+            ui.add_space(16.0);
+
+            // Draw avatar circle
+            let (_response, rect) =
+                ui.allocate_exact_size(egui::vec2(avatar_size, avatar_size), egui::Sense::hover());
+            let center = rect.rect.center();
+            ui.painter().circle_filled(
+                center,
+                avatar_size / 2.0,
+                egui::Color32::from_rgb(0, 168, 132),
+            );
+
+            // Draw first letter of login in the avatar
+            let letter = self
+                .login
+                .chars()
+                .next()
+                .map(|c| c.to_ascii_uppercase().to_string())
+                .unwrap_or_else(|| "U".to_string());
+            let text_size = ui.fonts_mut(|f| {
+                f.layout_no_wrap(
+                    letter.clone(),
+                    egui::FontId::proportional(14.0),
+                    egui::Color32::WHITE,
+                )
+            });
+            let text_pos = egui::Pos2::new(
+                center.x - text_size.size().x / 2.0,
+                center.y - text_size.size().y / 2.0,
+            );
+            ui.painter().text(
+                text_pos,
+                egui::Align2::LEFT_TOP,
+                &letter,
                 egui::FontId::proportional(14.0),
                 egui::Color32::WHITE,
-            )
-        });
-        let text_pos = egui::Pos2::new(
-            center.x - text_size.size().x / 2.0,
-            center.y - text_size.size().y / 2.0,
-        );
-        ui.painter().text(
-            text_pos,
-            egui::Align2::LEFT_TOP,
-            &letter,
-            egui::FontId::proportional(14.0),
-            egui::Color32::WHITE,
-        );
+            );
 
-        // Username next to avatar
-        ui.add_space(8.0);
-        let username_text = egui::RichText::new(&self.login)
-            .strong()
-            .size(14.0)
-            .color(egui::Color32::from_rgb(233, 237, 239));
-        // Make the username clickable to logout
-        let resp = ui.label(username_text);
-        if resp.clicked() {
-            self.input_mode = InputMode::Splash;
-            self.login.clear();
-            self.room.clear();
-            self.messages.clear();
-            let id = self.system_message_id;
-            self.system_message_id += 1;
-            self.messages
-                .insert(id, Self::system_message("Connecting to server...".into()));
-        }
+            // Stretch spacer to push logout button to the right
+            let spacer_width = ui.available_width() - 80.0; // account for button + padding
+            if spacer_width > 0.0 {
+                ui.allocate_exact_size(egui::vec2(spacer_width, 0.0), egui::Sense::hover());
+            }
 
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-            // Logout button
-            let logout_resp = ui.button(egui::RichText::new("⏻").size(12.0));
+            // Logout button (right side) - sidebar panel background
+            let logout_btn = egui::Button::new("Logout")
+                .fill(egui::Color32::from_rgb(42, 58, 68))
+                .min_size(egui::vec2(60.0, 24.0));
+            let logout_resp = ui.add(logout_btn);
             if logout_resp.clicked() {
                 self.queue_action(PendingAction::Logout);
             }
         });
+
+        // Bottom margin
+        ui.add_space(12.0);
+
+        // Visual separator between header and room list
+        let separator_height = 1.0;
+        let separator_rect = egui::Rect::from_min_size(
+            ui.next_widget_position(),
+            egui::vec2(ui.available_width(), separator_height),
+        );
+        ui.painter().hline(
+            separator_rect.x_range(),
+            separator_rect.min.y,
+            egui::Stroke::new(separator_height, egui::Color32::from_rgb(64, 80, 90)),
+        );
+        ui.add_space(8.0);
     }
 
     fn render_room_list(&mut self, ui: &mut egui::Ui) {
