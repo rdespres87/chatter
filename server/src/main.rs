@@ -420,13 +420,19 @@ async fn process_data(
         }
         chatter_protocol::ClientMessage::Logout => {
             info!("Logout requested by peer at {}", addr);
-            {
+            let login = {
                 let mut peers = peer_map
                     .write()
                     .expect("Peer map RwLock poisoned");
-                if let Some(peer) = peers.get_mut(&addr) {
+                peers.get_mut(&addr).map(|peer| {
+                    let rooms: Vec<String> = peer.rooms.iter().cloned().collect();
+                    let login = peer.login.clone();
                     peer.logout();
-                }
+                    (rooms, login)
+                })
+            };
+            if let Some((rooms, login)) = login {
+                announce_room_departures(&peer_map, &addr, &login, rooms);
             }
             send_server_message(
                 &peer_map,
