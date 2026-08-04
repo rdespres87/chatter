@@ -867,12 +867,19 @@ async fn handle_connection(
     pin_mut!(broadcast_incoming, receive_from_others);
     future::select(broadcast_incoming, receive_from_others).await;
 
-    info!("{} disconnected", addr);
+    info!("{addr} disconnected");
     let disconnected_peer = peer_map
         .write()
         .map_err(|e| anyhow::anyhow!("RwLock poisoned: {}", e))?
         .remove(&addr);
     if let Some(peer) = disconnected_peer {
+        info!(
+            "{} ({}) disconnected: authenticated={}, rooms={}",
+            peer.login,
+            addr,
+            peer.is_authenticated,
+            peer.rooms.len()
+        );
         for room in peer.rooms {
             broadcast_system_message(
                 &peer_map,
