@@ -1147,10 +1147,6 @@ impl App {
                     _ => "The server connection was lost.",
                 };
                 ui.label(status_text);
-                if ui.button("Reconnect").clicked() {
-                    self.reconnect_pending = true;
-                    self.start_reconnect();
-                }
             });
         });
     }
