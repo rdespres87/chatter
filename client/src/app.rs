@@ -152,6 +152,8 @@ pub struct App {
     has_scrolled_up: bool,
     /// Monotonically increasing counter for system message ids.
     system_message_id: u64,
+    /// Error message displayed on auth screens (login/password).
+    auth_error: Option<String>,
 }
 
 impl App {
@@ -203,6 +205,7 @@ impl App {
             has_more_history: false,
             has_scrolled_up: false,
             system_message_id: 1000, // Start above normal message ids
+            auth_error: None,
         }
     }
 
@@ -377,6 +380,7 @@ impl App {
                 self.login = login.clone();
                 self.connection_state = ConnectionState::LoggedIn { login };
                 self.input_mode = InputMode::Normal;
+                self.auth_error = None;
                 let id = self.system_message_id;
                 self.system_message_id += 1;
                 self.messages
@@ -386,10 +390,8 @@ impl App {
             ServerMessage::LoginFailed { reason } => {
                 self.connection_state = ConnectionState::Connected;
                 self.password_input.clear();
-                self.input_mode = InputMode::EnteringPassword;
-                let id = self.system_message_id;
-                self.system_message_id += 1;
-                self.messages.insert(id, Self::system_message(reason));
+                self.auth_error = Some(reason);
+                self.input_mode = InputMode::EnteringLogin;
             }
             ServerMessage::AccountCreated { login } => {
                 self.auth_mode = AuthMode::Login;
@@ -404,11 +406,8 @@ impl App {
                 );
             }
             ServerMessage::AccountCreationFailed { reason } => {
-                self.password_input.clear();
-                self.input_mode = InputMode::EnteringPassword;
-                let id = self.system_message_id;
-                self.system_message_id += 1;
-                self.messages.insert(id, Self::system_message(reason));
+                self.auth_error = Some(reason);
+                self.input_mode = InputMode::EnteringLogin;
             }
             ServerMessage::IncomingMessage {
                 id,
@@ -760,6 +759,8 @@ impl App {
     fn render_splash(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
             ui.vertical_centered(|ui| {
+                // Reset authentification error
+                self.auth_error = None;
                 ui.add_space(ui.available_height() * 0.3);
                 ui.heading(egui::RichText::new("Chatter").size(36.0));
                 ui.add_space(16.0);
@@ -789,7 +790,7 @@ impl App {
         }
         egui::CentralPanel::default().show(ui, |ui| {
             ui.vertical_centered(|ui| {
-                ui.add_space(ui.available_height() * 0.3);
+                ui.add_space(ui.available_height() * 0.2);
                 ui.heading(title);
                 ui.add_space(12.0);
                 let response = ui.add(
@@ -806,6 +807,11 @@ impl App {
                 if ui.button("Cancel").clicked() {
                     self.input_mode = InputMode::Splash;
                 }
+                // Display auth error if present
+                if let Some(ref err) = self.auth_error {
+                    ui.colored_label(egui::Color32::RED, err);
+                    ui.add_space(4.0);
+                }
             });
         });
     }
@@ -820,7 +826,7 @@ impl App {
         }
         egui::CentralPanel::default().show(ui, |ui| {
             ui.vertical_centered(|ui| {
-                ui.add_space(ui.available_height() * 0.3);
+                ui.add_space(ui.available_height() * 0.2);
                 ui.heading("Password");
                 ui.add_space(12.0);
                 let response = ui.add(
@@ -1028,7 +1034,12 @@ impl App {
         egui::Frame::menu(ui.style())
             .corner_radius(12.0)
             .outer_margin(egui::Margin::same(4))
-            .inner_margin(egui::Margin { left: 12, right: 12, top: 4, bottom: 4 })
+            .inner_margin(egui::Margin {
+                left: 12,
+                right: 12,
+                top: 4,
+                bottom: 4,
+            })
             .show(ui, |ui| {
                 let input_width = ui.available_width();
                 egui::ScrollArea::vertical()
