@@ -1454,4 +1454,65 @@ mod tests {
         assert!(peer.rooms.contains("general"));
         assert!(peer.rooms.contains("rust"));
     }
+
+    #[test]
+    fn test_peer_logout_clears_auth_and_rooms() {
+        let _addr = test_addr(8092);
+        let (tx, _rx) = futures_channel::mpsc::unbounded();
+        let mut peer = Peer::new(
+            tx,
+            "alice".to_string(),
+            vec!["general".to_string(), "random".to_string()].into_iter().collect(),
+        );
+
+        assert!(peer.is_authenticated);
+        assert_eq!(peer.login, "alice");
+        assert_eq!(peer.rooms.len(), 2);
+
+        peer.logout();
+
+        assert!(!peer.is_authenticated);
+        assert!(peer.login.is_empty());
+        assert!(peer.rooms.is_empty());
+    }
+
+    #[test]
+    fn test_peer_logout_idempotent() {
+        let _addr = test_addr(8093);
+        let (tx, _rx) = futures_channel::mpsc::unbounded();
+        let mut peer = Peer::new(
+            tx,
+            "alice".to_string(),
+            vec!["general".to_string()].into_iter().collect(),
+        );
+
+        // First logout
+        peer.logout();
+        assert!(!peer.is_authenticated);
+        assert!(peer.login.is_empty());
+        assert!(peer.rooms.is_empty());
+
+        // Second logout — should not panic, state unchanged
+        peer.logout();
+        assert!(!peer.is_authenticated);
+        assert!(peer.login.is_empty());
+        assert!(peer.rooms.is_empty());
+    }
+
+    #[test]
+    fn test_logout_sets_anonymous_login() {
+        let _addr = test_addr(8094);
+        let (tx, _rx) = futures_channel::mpsc::unbounded();
+        let mut peer = Peer::new(
+            tx.clone(),
+            "alice".to_string(),
+            vec!["general".to_string()].into_iter().collect(),
+        );
+
+        peer.logout();
+
+        // After logout, login should be empty and is_authenticated false.
+        assert_eq!(peer.login, "");
+        assert!(!peer.is_authenticated);
+    }
 }

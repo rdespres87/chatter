@@ -510,6 +510,7 @@ mod tests {
                 room: "general".to_string(),
                 cursor: None,
             },
+            ClientMessage::Logout,
         ]
     }
 
@@ -551,6 +552,7 @@ mod tests {
                 message: "Something went wrong".to_string(),
                 code: "GENERAL".to_string(),
             },
+            ServerMessage::LogoutOk,
         ]
     }
 
@@ -567,6 +569,11 @@ mod tests {
     fn serialized_tag(json: &str) -> String {
         let value: serde_json::Value = serde_json::from_str(json).unwrap();
 
+        // Unit variants serialize as strings (e.g. "Logout"), not objects.
+        // For object-tagged variants, return the top-level key.
+        if let Some(s) = value.as_str() {
+            return s.to_string();
+        }
         value.as_object().unwrap().keys().next().unwrap().clone()
     }
 
