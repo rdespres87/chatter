@@ -41,6 +41,8 @@ pub enum ClientMessage {
     /// cursor-based pagination.  Omit `cursor` (or pass `None`) to fetch the
     /// most recent chunk.
     GetHistory { room: String, cursor: Option<u64> },
+    /// Request to disconnect from the server.
+    Logout,
 }
 
 impl fmt::Debug for ClientMessage {
@@ -68,6 +70,7 @@ impl fmt::Debug for ClientMessage {
                 .field("room", room)
                 .field("cursor", cursor)
                 .finish(),
+            Self::Logout => f.debug_struct("Logout").finish(),
         }
     }
 }
@@ -109,6 +112,8 @@ pub enum ServerMessage {
         /// True when more messages are available beyond this chunk.
         has_more: bool,
     },
+    /// Logout succeeded. The peer is now unauthenticated.
+    LogoutOk,
     /// Generic server-side error.
     Error { message: String, code: String },
 }
@@ -286,6 +291,7 @@ pub fn validate_client_message(msg: &mut ClientMessage) -> Result<()> {
             validate_room(room)?;
             validate_message(message)?;
         }
+        ClientMessage::Logout => {}
     }
     Ok(())
 }
@@ -360,6 +366,7 @@ fn normalized_client_message(message: &ClientMessage) -> Result<Cow<'_, ClientMe
                 }))
             }
         }
+        ClientMessage::Logout => Ok(Cow::Borrowed(message)),
     }
 }
 
@@ -399,6 +406,7 @@ fn validate_server_message(message: &ServerMessage) -> Result<()> {
                 validate_history_entry(entry)?;
             }
         }
+        ServerMessage::LogoutOk => {}
         ServerMessage::Error { message, code } => {
             validate_required_text(message, "message", MAX_REASON_LEN)?;
             validate_required_text(code, "code", 64)?;

@@ -106,6 +106,7 @@ enum PendingAction {
     LeaveRoom { room: String },
     JoinRoom { room: String },
     GetHistory { room: String, cursor: Option<u64> },
+    Logout,
 }
 
 #[derive(Debug)]
@@ -520,6 +521,18 @@ impl App {
                 self.messages
                     .insert(id, Self::system_message(format!("[{code}] {message}")));
             }
+            ServerMessage::LogoutOk => {
+                self.login.clear();
+                self.connection_state = ConnectionState::Connected;
+                self.input_mode = InputMode::Splash;
+                self.auth_error = None;
+                self.rooms.clear();
+                self.room_selected = 0;
+                let id = self.system_message_id;
+                self.system_message_id += 1;
+                self.messages
+                    .insert(id, Self::system_message("Logged out.".into()));
+            }
         }
         // Keep only the most recent MAX_HISTORY messages (by id).
         if self.messages.len() > MAX_HISTORY {
@@ -735,6 +748,7 @@ impl App {
                 PendingAction::GetHistory { room, cursor } => {
                     (ClientMessage::GetHistory { room, cursor }, false)
                 }
+                PendingAction::Logout => (ClientMessage::Logout, false),
             };
             let result = async {
                 let json = chatter_protocol::serialize_client_message(&message)
@@ -909,14 +923,7 @@ impl App {
             // Logout button
             let logout_resp = ui.button(egui::RichText::new("⏻").size(12.0));
             if logout_resp.clicked() {
-                self.input_mode = InputMode::Splash;
-                self.login.clear();
-                self.room.clear();
-                self.messages.clear();
-                let id = self.system_message_id;
-                self.system_message_id += 1;
-                self.messages
-                    .insert(id, Self::system_message("Connecting to server...".into()));
+                self.queue_action(PendingAction::Logout);
             }
         });
     }

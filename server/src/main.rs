@@ -53,6 +53,7 @@ pub(crate) struct Peer {
     pub(crate) rooms: HashSet<String>,
     login_failures: u32,
     next_account_attempt: Option<Instant>,
+    is_authenticated: bool,
 }
 
 impl Peer {
@@ -63,7 +64,14 @@ impl Peer {
             rooms,
             login_failures: 0,
             next_account_attempt: None,
+            is_authenticated: true,
         }
+    }
+
+    fn logout(&mut self) {
+        self.login.clear();
+        self.rooms.clear();
+        self.is_authenticated = false;
     }
 }
 
@@ -409,6 +417,23 @@ async fn process_data(
             {
                 send_history(&peer_map, addr, room, history, has_more).ok();
             }
+        }
+        chatter_protocol::ClientMessage::Logout => {
+            info!("Logout requested by peer at {}", addr);
+            {
+                let mut peers = peer_map
+                    .write()
+                    .expect("Peer map RwLock poisoned");
+                if let Some(peer) = peers.get_mut(&addr) {
+                    peer.logout();
+                }
+            }
+            send_server_message(
+                &peer_map,
+                addr,
+                chatter_protocol::ServerMessage::LogoutOk,
+            )
+            .ok();
         }
     }
 }
