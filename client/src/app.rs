@@ -1,12 +1,12 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use chrono::{DateTime, NaiveDate, Utc};
-use futures_util::{FutureExt, SinkExt, StreamExt};
-use tokio::sync::{Mutex, Notify, mpsc};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use futures_util::{FutureExt, SinkExt};
+use tokio::sync::{mpsc, Notify};
+use tokio_tungstenite::tungstenite::protocol::Message;
 
 use chatter_protocol::{ClientMessage, ServerMessage};
-use crate::events::{AppEvent, EventHandler, SharedSink, SharedRead, MAX_HISTORY, CONNECT_TIMEOUT, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT};
+use crate::events::{AppEvent, EventHandler, SharedSink, SharedRead, MAX_HISTORY};
 
 use crate::utils::{format_date_separator, format_timestamp_bubble, resolve_sender};
 
@@ -131,7 +131,7 @@ pub struct App {
 
 impl App {
     pub async fn new(url: String, default_user: Option<String>) -> Self {
-        let (event_handler, ws_sink, initial_read, connect_notify) = EventHandler::new();
+        let (mut event_handler, ws_sink, initial_read, connect_notify) = EventHandler::new();
         let (action_tx, action_rx) = mpsc::unbounded_channel();
         let events_tx = event_handler.events_tx();  // clone stored in App for reconnect
         event_handler.connect(
@@ -177,168 +177,6 @@ impl App {
             has_scrolled_up: false,
             system_message_id: 1000, // Start above normal message ids
             auth_error: None,
-        }
-    }
-
-    fn spawn_connection(
-        url: String,
-        sink: SharedSink,
-        initial_read: SharedRead,
-        events: mpsc::UnboundedSender<AppEvent>,
-        notify: Arc<Notify>,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            match tokio::time::timeout(CONNECT_TIMEOUT, connect_async(&url)).await {
-                Ok(Ok((socket, _))) => {
-                    let (write, read) = socket.split();
-                    *sink.lock().await = Some(write);
-                    *initial_read.lock().await = Some(read);
-                    notify.notify_one();
-                    Self::start_reader_and_heartbeat(sink, initial_read, events, None).await;
-                }
-                Ok(Err(error)) => {
-                    let _ = events.send(AppEvent::ConnectionError {
-                        reason: error.to_string(),
-                    });
-                }
-                Err(_) => {
-                    let _ = events.send(AppEvent::ConnectionError {
-                        reason: "connection timed out".into(),
-                    });
-                }
-            }
-        })
-    }
-
-    async fn start_reader_and_heartbeat(
-        sink: SharedSink,
-        initial_read: SharedRead,
-        events: mpsc::UnboundedSender<AppEvent>,
-        initial_message: Option<String>,
-    ) {
-        let Some(mut read) = initial_read.lock().await.take() else {
-            return;
-        };
-        let (pong_tx, mut pong_rx) = mpsc::unbounded_channel();
-        let read_events = events.clone();
-        let sink_for_reader = sink.clone();
-        tokio::spawn(async move {
-            // Send initial message if provided (ensures reader is listening first)
-            if let Some(msg) = initial_message {
-                if let Some(ws) = sink_for_reader.lock().await.as_mut() {
-                    let _ = ws.send(Message::Text(msg.into())).await;
-                }
-            }
-            while let Some(result) = read.next().await {
-                match result {
-                    Ok(Message::Text(data)) => {
-                        let _ = read_events.send(AppEvent::ReceivedMsg {
-                            data: Message::Text(data),
-                        });
-                    }
-                    Ok(Message::Pong(_)) => {
-                        let _ = pong_tx.send(());
-                    }
-                    Ok(Message::Close(frame)) => {
-                        let close_code = frame.as_ref().map(|f| f.code.into());
-                        let close_reason = frame.map(|f| f.reason.to_string());
-                        let _ = read_events.send(AppEvent::Disconnected {
-                            close_code,
-                            close_reason,
-                        });
-                        return;
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        let _ = read_events.send(AppEvent::ConnectionError {
-                            reason: error.to_string(),
-                        });
-                        return;
-                    }
-                }
-            }
-            let _ = read_events.send(AppEvent::Disconnected {
-                close_code: None,
-                close_reason: None,
-            });
-        });
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                let ping_result = match sink.lock().await.as_mut() {
-                    Some(ws) => ws.send(Message::Ping(Vec::new().into())).await,
-                    None => return,
-                };
-                if let Err(error) = ping_result {
-                    let _ = events.send(AppEvent::ConnectionError {
-                        reason: format!("heartbeat ping failed: {error}"),
-                    });
-                    return;
-                }
-                if tokio::time::timeout(HEARTBEAT_TIMEOUT, pong_rx.recv())
-                    .await
-                    .is_err()
-                {
-                    let _ = events.send(AppEvent::ConnectionError {
-                        reason: "heartbeat pong timed out".into(),
-                    });
-                    return;
-                }
-            }
-        });
-    }
-
-    pub async fn reconnect_attempt(
-        url: String,
-        sink: SharedSink,
-        initial_read: SharedRead,
-        events: mpsc::UnboundedSender<AppEvent>,
-        notify: Arc<Notify>,
-        login: Option<String>,
-        password: Option<String>,
-    ) {
-        let mut delay = Duration::from_secs(2);
-        loop {
-            match tokio::time::timeout(CONNECT_TIMEOUT, connect_async(&url)).await {
-                Ok(Ok((socket, _))) => {
-                    let (write, read) = socket.split();
-                    *sink.lock().await = Some(write);
-                    *initial_read.lock().await = Some(read);
-                    // Build initial login message to send AFTER reader starts.
-                    // Always try to login on reconnect if we have credentials,
-                    // even when prev_input_mode is Splash or EnteringLogin.
-                    let initial_msg = if let (Some(l), Some(p)) =
-                        (login.as_ref(), password.as_ref())
-                        && !l.is_empty()
-                        && !p.is_empty()
-                    {
-                        let payload = ClientMessage::Login {
-                            login: l.clone(),
-                            passwd: p.clone(),
-                        };
-                        chatter_protocol::serialize_client_message(&payload).ok()
-                    } else {
-                        // No stored credentials — send a minimal login with empty
-                        // strings so the server knows we're reconnecting and can
-                        // send back a RoomList / Welcome message.  The server
-                        // will likely return an error, but at least the reader is
-                        // alive and we'll see what happens.
-                        // A better approach: always send login if we have any
-                        // credentials stored in self.login / self.reconnect_password.
-                        None
-                    };
-                    notify.notify_one();
-                    let _ = events.send(AppEvent::Reconnected);
-                    Self::start_reader_and_heartbeat(sink, initial_read, events, initial_msg).await;
-                    return;
-                }
-                Ok(Err(_)) | Err(_) => {
-                    tokio::time::sleep(delay).await;
-                    delay = (delay * 2).min(Duration::from_secs(60));
-                }
-            }
         }
     }
 
@@ -554,7 +392,7 @@ impl App {
             let sink = self.ws_sink.clone();
             let read = self.initial_read.clone();
             let notify = self.connect_notify.clone();
-            let events_tx = self.events_tx.clone();  // the clone stored in App
+            let events_tx = self.events_tx.clone();
             let login = if self.login.is_empty() && !self.login_input.is_empty() {
                 Some(self.login_input.clone())
             } else if !self.login.is_empty() {

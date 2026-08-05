@@ -1,5 +1,6 @@
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::task::JoinHandle;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
 };
@@ -43,13 +44,13 @@ pub enum AppEvent {
 
 // ── Async functions (moved from App impl) ─────────────────────────────────
 
-pub async fn spawn_connection(
+pub fn spawn_connection(
     url: String,
     sink: SharedSink,
     initial_read: SharedRead,
     events: mpsc::UnboundedSender<AppEvent>,
     notify: Arc<Notify>,
-) {
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         match tokio::time::timeout(CONNECT_TIMEOUT, connect_async(&url)).await {
             Ok(Ok((socket, _))) => {
@@ -70,7 +71,7 @@ pub async fn spawn_connection(
                 });
             }
         }
-    });
+    })
 }
 
 async fn start_reader_and_heartbeat(
@@ -200,6 +201,8 @@ pub async fn reconnect_attempt(
 pub struct EventHandler {
     events_tx: mpsc::UnboundedSender<AppEvent>,
     events_rx: mpsc::UnboundedReceiver<AppEvent>,
+    /// Handle for the initial connection task (prevents it from being dropped).
+    _connect_handle: Option<JoinHandle<()>>,
 }
 
 impl EventHandler {
@@ -210,13 +213,12 @@ impl EventHandler {
         let ws_sink: SharedSink = Arc::new(Mutex::new(None));
         let initial_read: SharedRead = Arc::new(Mutex::new(None));
         let connect_notify = Arc::new(Notify::new());
-        let handler = Self { events_tx, events_rx };
+        let handler = Self {
+            events_tx,
+            events_rx,
+            _connect_handle: None,
+        };
         (handler, ws_sink, initial_read, connect_notify)
-    }
-
-    /// Get a reference to the event receiver.
-    pub fn receiver(&self) -> &mpsc::UnboundedReceiver<AppEvent> {
-        &self.events_rx
     }
 
     /// Try to receive an event (delegates to the inner receiver).
@@ -233,29 +235,15 @@ impl EventHandler {
     /// Takes `events_tx` as a parameter to avoid double-cloning:
     /// the caller clones once via `events_tx()`, passes it here, and stores another clone in App.
     pub fn connect(
-        &self,
+        &mut self,
         url: String,
         sink: SharedSink,
         initial_read: SharedRead,
         notify: Arc<Notify>,
         events_tx: mpsc::UnboundedSender<AppEvent>,
     ) {
-        spawn_connection(url, sink, initial_read, events_tx, notify);
-    }
-
-    /// Re-attempt WebSocket connection with credentials.
-    pub async fn reconnect(
-        &self,
-        url: String,
-        sink: SharedSink,
-        initial_read: SharedRead,
-        notify: Arc<Notify>,
-        login: Option<String>,
-        password: Option<String>,
-    ) {
-        reconnect_attempt(
-            url, sink, initial_read, self.events_tx.clone(), notify, login, password,
-        )
-        .await;
+        self._connect_handle = Some(spawn_connection(
+            url, sink, initial_read, events_tx, notify,
+        ));
     }
 }
