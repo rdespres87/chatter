@@ -6,6 +6,10 @@ description.workspace = true
 documentation.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "chatter"
+path = "src/main.rs"
+
 [dependencies]
 futures-channel = "0.3.28"
 tokio-tungstenite = "0.29.0"

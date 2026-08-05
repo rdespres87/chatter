@@ -597,7 +597,7 @@ impl App {
                 // Reset authentification error
                 self.auth_error = None;
                 ui.add_space(ui.available_height() * 0.3);
-                ui.heading(egui::RichText::new("Chatter").size(36.0));
+                ui.heading(egui::RichText::new("chatter").size(36.0));
                 ui.add_space(16.0);
                 if ui.button("Login").clicked() {
                     self.auth_mode = AuthMode::Login;

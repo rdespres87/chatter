@@ -1,4 +1,4 @@
-# Chatter
+# chatter
 
 WebSocket chat application with an egui desktop client, written in Rust.
 
@@ -8,9 +8,9 @@ The project is organized as a Cargo workspace with three independent crates:
 
 ```
 chatter/
-├── protocol/   # Shared message types and serialization
-├── server/     # WebSocket server (tokio-tungstenite + SQLite)
-└── client/     # egui desktop chat client
+├── protocol/   # Shared message types and serialization (binary: none)
+├── server/     # WebSocket server (tokio-tungstenite + SQLite) (binary: server)
+└── client/     # egui desktop chat client (binary: chatter)
 ```
 
 ### Protocol Crate (`protocol/`)

@@ -54,11 +54,23 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    // Load the app icon from disk (relative to client/ crate root).
+    let icon_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("icon.rgba");
+    let icon_bytes = std::fs::read(&icon_path).unwrap_or_default();
+    let icon_data = egui::IconData {
+        rgba: icon_bytes,
+        width: 512,
+        height: 512,
+    };
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1024.0, 768.0])
             .with_resizable(true)
-            .with_title("Chatter"),
+            .with_title("chatter")
+            .with_icon(icon_data),
         ..Default::default()
     };
 
@@ -68,7 +80,7 @@ fn main() -> eframe::Result<()> {
     let app = Arc::new(Mutex::new(app));
 
     eframe::run_native(
-        "Chatter",
+        "chatter",
         options,
         Box::new(move |_cc| Ok(Box::new(AppWrapper { inner: app.clone() }))),
     )
