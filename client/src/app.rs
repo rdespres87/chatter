@@ -1286,7 +1286,7 @@ impl App {
         let max_bubble_width = ui.available_width() - 2.0 * padding;
         let max_width = min_bubble_width.min(max_bubble_width);
 
-        // Allouer l'espace + dessiner le fond
+        // Allocate space + draw background
         let bubble_size = egui::Vec2::new(max_width + padding * 2.0, total_height);
         let (_resp, painter) = ui.allocate_painter(bubble_size, egui::Sense::hover());
         painter.rect_filled(_resp.rect, corner_radius, bubble_color);
