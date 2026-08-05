@@ -20,6 +20,21 @@ const THEME_ACCENT: egui::Color32 = egui::Color32::from_rgb(67, 148, 239);
 const THEME_FONT_SENDER_SIZE: f32 = 12.0;
 const THEME_FONT_CONTENT_SIZE: f32 = 14.0;
 
+/// Generate a deterministic vibrant color from a username string.
+/// Same name → same color, always.
+fn sender_color_for(name: &str) -> egui::Color32 {
+    // FNV-1a hash to get a u32, then extract R/G/B channels
+    let mut hash: u32 = 0x811c9dc5;
+    for byte in name.bytes() {
+        hash = hash.wrapping_mul(0x01000193).wrapping_add(byte as u32);
+    }
+    // Spread bits across R, G, B — offset ensures colors are bright enough
+    let r = ((hash >> 16) & 0xFF) + 80;
+    let g = ((hash >> 8) & 0xFF) + 80;
+    let b = (hash & 0xFF) + 80;
+    egui::Color32::from_rgb((r & 0xFF) as u8, (g & 0xFF) as u8, (b & 0xFF) as u8)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthMode {
     Login,
@@ -986,6 +1001,7 @@ impl App {
         corner_radius: f32,
         align_right: bool,
         is_own: bool,
+        sender_color: egui::Color32,
     ) {
         let padding = 8.0;
 
@@ -1002,6 +1018,7 @@ impl App {
                         corner_radius,
                         padding,
                         is_own,
+                        sender_color,
                     );
                 });
             });
@@ -1017,6 +1034,7 @@ impl App {
                     corner_radius,
                     padding,
                     is_own,
+                    sender_color,
                 );
             });
         }
@@ -1032,6 +1050,7 @@ impl App {
         corner_radius: f32,
         padding: f32,
         is_own: bool,
+        sender_color: egui::Color32,
     ) {
         let sender_font = egui::FontId::new(THEME_FONT_SENDER_SIZE, egui::FontFamily::Proportional);
         let content_font =
@@ -1048,7 +1067,7 @@ impl App {
         let sender_galley = ui.painter().layout_no_wrap(
             sender_text.clone(),
             sender_font.clone(),
-            text_color.gamma_multiply(0.6),
+            sender_color,
         );
         let sender_size = sender_galley.size();
 
@@ -1107,7 +1126,7 @@ impl App {
                 egui::Align2::LEFT_TOP,
                 sender_text.as_str(),
                 sender_font,
-                text_color.gamma_multiply(0.6),
+                sender_color,
             );
         }
 
@@ -1223,6 +1242,11 @@ impl App {
                     } else {
                         THEME_TEXT_OTHER
                     };
+                    let sender_color = if is_own {
+                        text_color // own messages: sender name hidden anyway
+                    } else {
+                        sender_color_for(&message.sender)
+                    };
                     let time_str = format_timestamp_bubble(message.timestamp);
 
                     Self::render_bubble(
@@ -1235,6 +1259,7 @@ impl App {
                         corner_radius,
                         is_own,
                         is_own,
+                        sender_color,
                     );
                     ui.add_space(6.0);
                 }
