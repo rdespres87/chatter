@@ -11,9 +11,9 @@ use chatter_protocol::ClientMessage;
 // ── Constants ──────────────────────────────────────────────────────────────
 
 pub(crate) const MAX_HISTORY: usize = 500;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
-const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+pub(crate) const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ── WebSocket types ───────────────────────────────────────────────────────
 
@@ -215,9 +215,13 @@ impl EventHandler {
     }
 
     /// Get a reference to the event receiver.
-    /// Returns `&` (not `&mut`) because `try_recv()` only needs shared access.
     pub fn receiver(&self) -> &mpsc::UnboundedReceiver<AppEvent> {
         &self.events_rx
+    }
+
+    /// Try to receive an event (delegates to the inner receiver).
+    pub fn try_recv(&mut self) -> Result<AppEvent, mpsc::error::TryRecvError> {
+        self.events_rx.try_recv()
     }
 
     /// Clone the event sender (for use in reconnect).

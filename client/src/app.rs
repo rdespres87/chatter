@@ -2,22 +2,13 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use chrono::{DateTime, NaiveDate, Utc};
 use futures_util::{FutureExt, SinkExt, StreamExt};
-use tokio::{
-    net::TcpStream,
-    sync::{Mutex, Notify, mpsc},
-};
-use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
-};
+use tokio::sync::{Mutex, Notify, mpsc};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
 use chatter_protocol::{ClientMessage, ServerMessage};
+use crate::events::{AppEvent, EventHandler, SharedSink, SharedRead, MAX_HISTORY, CONNECT_TIMEOUT, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT};
 
 use crate::utils::{format_date_separator, format_timestamp_bubble, resolve_sender};
-
-const MAX_HISTORY: usize = 500;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
-const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ── Theme constants (Ocean Night) ──────────────────────────────────────
 const THEME_PANEL_FILL: egui::Color32 = egui::Color32::from_rgb(15, 17, 24);
@@ -28,11 +19,6 @@ const THEME_TEXT_OTHER: egui::Color32 = egui::Color32::from_rgb(203, 214, 227);
 const THEME_ACCENT: egui::Color32 = egui::Color32::from_rgb(67, 148, 239);
 const THEME_FONT_SENDER_SIZE: f32 = 12.0;
 const THEME_FONT_CONTENT_SIZE: f32 = 14.0;
-
-type WsSink = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
-type SharedSink = Arc<Mutex<Option<WsSink>>>;
-type WsRead = futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
-type SharedRead = Arc<Mutex<Option<WsRead>>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthMode {
@@ -83,21 +69,6 @@ pub struct MessageEntry {
     pub msg_type: MessageType,
 }
 
-#[derive(Clone, Debug)]
-pub enum AppEvent {
-    ReceivedMsg {
-        data: Message,
-    },
-    Disconnected {
-        close_code: Option<u16>,
-        close_reason: Option<String>,
-    },
-    ConnectionError {
-        reason: String,
-    },
-    Reconnected,
-}
-
 #[derive(Debug, Clone)]
 enum PendingAction {
     Login { login: String, password: String },
@@ -136,8 +107,9 @@ pub struct App {
     auth_mode: AuthMode,
     connect_notify: Arc<Notify>,
     reconnect_pending: bool,
+    event_handler: EventHandler,
+    /// Clone of the event sender for reconnect (EventHandler is not Clone).
     events_tx: mpsc::UnboundedSender<AppEvent>,
-    events_rx: mpsc::UnboundedReceiver<AppEvent>,
     pending_actions: Vec<PendingAction>,
     action_tx: mpsc::UnboundedSender<ActionResult>,
     action_rx: mpsc::UnboundedReceiver<ActionResult>,
@@ -159,17 +131,15 @@ pub struct App {
 
 impl App {
     pub async fn new(url: String, default_user: Option<String>) -> Self {
-        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let (event_handler, ws_sink, initial_read, connect_notify) = EventHandler::new();
         let (action_tx, action_rx) = mpsc::unbounded_channel();
-        let ws_sink = Arc::new(Mutex::new(None));
-        let initial_read = Arc::new(Mutex::new(None));
-        let connect_notify = Arc::new(Notify::new());
-        Self::spawn_connection(
+        let events_tx = event_handler.events_tx();  // clone stored in App for reconnect
+        event_handler.connect(
             url.clone(),
             ws_sink.clone(),
             initial_read.clone(),
-            events_tx.clone(),
             connect_notify.clone(),
+            events_tx.clone(),  // clone for connect, keep original for App struct
         );
         Self {
             url,
@@ -194,8 +164,8 @@ impl App {
             auth_mode: AuthMode::Login,
             connect_notify,
             reconnect_pending: false,
+            event_handler,
             events_tx,
-            events_rx,
             pending_actions: Vec::new(),
             action_tx,
             action_rx,
@@ -583,13 +553,8 @@ impl App {
             let url = self.url.clone();
             let sink = self.ws_sink.clone();
             let read = self.initial_read.clone();
-            let events = self.events_tx.clone();
             let notify = self.connect_notify.clone();
-            // Always send stored credentials on reconnect, not just when
-            // self.login is non-empty.  self.login_input / self.password_input
-            // are the last credentials the user typed, and self.reconnect_password
-            // is the password we stored at login time.  Using these ensures that
-            // even a client on Splash/EnteringLogin will re-authenticate.
+            let events_tx = self.events_tx.clone();  // the clone stored in App
             let login = if self.login.is_empty() && !self.login_input.is_empty() {
                 Some(self.login_input.clone())
             } else if !self.login.is_empty() {
@@ -605,7 +570,10 @@ impl App {
                 }
             });
             tokio::spawn(async move {
-                Self::reconnect_attempt(url, sink, read, events, notify, login, password).await;
+                crate::events::reconnect_attempt(
+                    url, sink, read, events_tx, notify, login, password,
+                )
+                .await;
             });
             self.reconnect_pending = false;
         }
@@ -1457,7 +1425,7 @@ impl App {
     }
 
     pub fn logic(&mut self, ctx: &egui::Context) {
-        while let Ok(event) = self.events_rx.try_recv() {
+        while let Ok(event) = self.event_handler.try_recv() {
             match event {
                 AppEvent::ReceivedMsg { data } => self.handle_server_message(data),
                 AppEvent::Disconnected {
