@@ -134,6 +134,83 @@ cargo test -p server
 cargo test -p client
 ```
 
+## Docker
+
+The project can be built and run inside a Docker container. Only the server is containerized (the client is a native egui desktop app).
+
+### Quick Start
+
+```bash
+# Build the Docker image
+docker build -t chatter-server .
+
+# Run in detached mode (background)
+docker compose up -d
+
+# View server logs in real-time
+docker compose logs -f server
+
+# Stop and remove the container
+docker compose down
+```
+
+### Full Docker Compose Commands
+
+| Command | Description |
+|---------|-------------|
+| `docker compose up -d` | Build and start the server in detached mode |
+| `docker compose logs -f server` | Follow server logs in real-time |
+| `docker compose ps` | Show running containers |
+| `docker compose down` | Stop and remove the container + network |
+| `docker compose down -v` | Stop, remove container + named volume (clears SQLite data) |
+| `docker compose build --no-cache` | Rebuild image from scratch (no cache) |
+
+### Architecture
+
+The Dockerfile uses a **multi-stage build** to keep the final image small:
+
+1. **Builder stage** (`rust:1.85-bookworm`): Compiles the server in release mode
+2. **Runtime stage** (`debian:bookworm-slim`): Contains only the compiled binary + CA certificates
+
+The server runs as a non-root user (`appuser`) for security.
+
+### Configuration
+
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `RUST_LOG` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
+
+The server listens on port `12345` by default inside the container. The host port is mapped via `docker-compose.yml`.
+
+### Database Persistence
+
+The SQLite database is stored in a named Docker volume (`chatter_data`) mounted at `/app/data` inside the container. Data survives container restarts.
+
+To start fresh (delete all data):
+```bash
+docker compose down -v
+docker compose up -d
+```
+
+### Building Without Docker Compose
+
+```bash
+# Build the image
+docker build -t chatter-server .
+
+# Run directly
+docker run -d \
+  --name chatter-server \
+  -p 12345:12345 \
+  -e RUST_LOG=info \
+  -v chatter_data:/app/data \
+  --restart unless-stopped \
+  chatter-server
+
+# Stop
+docker stop chatter-server && docker rm chatter-server
+```
+
 ## Project Structure
 
 Each crate can be compiled independently:
