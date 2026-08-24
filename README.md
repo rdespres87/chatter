@@ -104,12 +104,6 @@ cargo run -p client
 
 # Connect to a custom server address
 cargo run -p client -- --url ws://192.168.1.10:9000
-
-# Specify username for automatic login
-cargo run -p client -- --user alice
-
-# Combine URL and port
-cargo run -p client -- --url ws://192.168.1.10:9000 --user bob
 ```
 
 **Client CLI options:**
@@ -118,7 +112,6 @@ cargo run -p client -- --url ws://192.168.1.10:9000 --user bob
 |--------|---------|-------------|
 | `--url` | `ws://localhost:8080` | WebSocket server URL |
 | `-p, --port` | (extracted from URL) | Server port (overrides URL port) |
-| `--user` | (interactive prompt) | Username for automatic login |
 
 **Note:** The `--url` option takes precedence over `--port`. If only `--port` is provided, it overrides the corresponding value in the URL.
 

@@ -17,10 +17,6 @@ struct Args {
     /// Server port (overrides the port in --url if provided).
     #[arg(short, long)]
     port: Option<u16>,
-
-    /// Default username for login.
-    #[arg(long = "user")]
-    default_user: Option<String>,
 }
 
 fn main() -> eframe::Result<()> {
@@ -76,7 +72,7 @@ fn main() -> eframe::Result<()> {
 
     let runtime = tokio::runtime::Runtime::new().expect("failed to create Tokio runtime");
     let _runtime_guard = runtime.enter();
-    let app = tokio::runtime::Handle::current().block_on(App::new(url, args.default_user));
+    let app = tokio::runtime::Handle::current().block_on(App::new(url));
     let app = Arc::new(Mutex::new(app));
 
     eframe::run_native(

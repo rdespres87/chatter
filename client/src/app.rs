@@ -145,7 +145,7 @@ pub struct App {
 }
 
 impl App {
-    pub async fn new(url: String, default_user: Option<String>) -> Self {
+    pub async fn new(url: String) -> Self {
         let (mut event_handler, ws_sink, initial_read, connect_notify) = EventHandler::new();
         let (action_tx, action_rx) = mpsc::unbounded_channel();
         let events_tx = event_handler.events_tx();  // clone stored in App for reconnect
@@ -169,9 +169,9 @@ impl App {
             message_offset: 0,
             ws_sink,
             initial_read,
-            login: default_user.clone().unwrap_or_default(),
+            login: String::new(),
             room: "general".into(),
-            login_input: default_user.unwrap_or_default(),
+            login_input: String::new(),
             password_input: String::new(),
             reconnect_password: None,
             rooms: default_rooms(),
