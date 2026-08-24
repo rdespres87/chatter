@@ -911,6 +911,11 @@ struct Cli {
     /// Port to listen on.
     #[arg(short, long, default_value_t = 8080)]
     port: u16,
+
+    /// Path to the SQLite database file.
+    /// Defaults to the DB_PATH environment variable, or "chatter.db" if not set.
+    #[arg(long)]
+    db: Option<String>,
 }
 
 #[tokio::main]
@@ -919,8 +924,13 @@ async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     warn!("{}", TRANSPORT_SECURITY_NOTICE);
 
+    let db_path = cli
+        .db
+        .or_else(|| std::env::var("DB_PATH").ok())
+        .unwrap_or_else(|| "chatter.db".to_string());
+
     let account_db =
-        Account::new("chatter.db".to_string()).context("Failed to initialize database")?;
+        Account::new(db_path).context("Failed to initialize database")?;
 
     let addr = format!("{}:{}", cli.host, cli.port);
 
