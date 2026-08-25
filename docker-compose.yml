@@ -11,6 +11,10 @@ services:
       - chatter_data:/app/data
     environment:
       - RUST_LOG=info
+      # Server bind address (0.0.0.0 = all interfaces, 127.0.0.1 = localhost only)
+      - CHATTER_HOST=0.0.0.0
+      # Server listening port (default 8080, overridden here for Docker)
+      - CHATTER_PORT=12345
       # Optional: override the database path if you change the code later
       # - DB_PATH=/app/data/chatter.db
     restart: unless-stopped

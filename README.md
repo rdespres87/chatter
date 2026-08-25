@@ -216,9 +216,7 @@ non-blocking I/O during reconnection attempts.
 - **Single-server deployment**: No support for horizontal scaling across
   multiple server instances. Each server manages its own SQLite database and
   in-memory room state.
-- **No message encryption**: WebSocket connections use plain text (ws://). TLS
-  (wss://) is not currently supported. The server prints a security notice on
-  startup reminding operators to deploy behind a TLS-terminating reverse proxy.
+- **No server-side TLS**: The server accepts plain ws:// connections. Deploy it behind a TLS-terminating reverse proxy (e.g., Caddy, Nginx) to provide wss:// to clients. The server prints a security notice on startup reminding operators of this. The client supports `wss://` URLs (via native-tls) for connecting to TLS-terminated proxies.
 - **No file/image sharing**: Only text messages are supported.
 - **No direct messaging (DMs)**: All messages are room-scoped; there is no
   private messaging between individual users.
@@ -270,6 +268,9 @@ cargo run -p server -- --db /tmp/chat.db
 
 # Using the DB_PATH environment variable
 DB_PATH=/tmp/chat.db cargo run -p server
+
+# Using CHATTER_HOST / CHATTER_PORT environment variables
+CHATTER_HOST=0.0.0.0 CHATTER_PORT=9000 cargo run -p server
 ```
 
 **Server CLI options:**
@@ -279,6 +280,15 @@ DB_PATH=/tmp/chat.db cargo run -p server
 | `--host` | `127.0.0.1` | Host to bind the server to |
 | `-p, --port` | `8080` | Port to listen on |
 | `--db` | `chatter.db` | Path to the SQLite database file |
+
+**Environment variables:**
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `DB_PATH` | `chatter.db` | Path to the SQLite database file (overrides `--db`) |
+| `CHATTER_HOST` | CLI `--host` value | Server bind address (overrides `--host`) |
+| `CHATTER_PORT` | CLI `--port` value | Server listening port (overrides `--port`) |
+| `RUST_LOG` | `info` | Log level (see log levels section) |
 
 **Log levels:**
 
@@ -354,6 +364,12 @@ The `docker-compose.yml` file defines:
 - **Auto-restart**: `restart: unless-stopped` ensures the server recovers from
   crashes.
 - **Logging**: `RUST_LOG=info` sets the default log level.
+- **Configurable bind address**: `CHATTER_HOST=0.0.0.0` (all interfaces) and
+  `CHATTER_PORT=12345` are set via environment variables. Change these values in
+  `docker-compose.yml` or create a `.env` file to override.
+
+To customize the server configuration, either edit `docker-compose.yml` directly
+or copy `.env.example` to `.env` and modify the values there.
 
 ### Dockerfile (Multi-stage Build)
 

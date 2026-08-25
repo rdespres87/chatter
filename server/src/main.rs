@@ -929,7 +929,12 @@ async fn main() -> anyhow::Result<()> {
 
     let account_db = Account::new(db_path).context("Failed to initialize database")?;
 
-    let addr = format!("{}:{}", cli.host, cli.port);
+    let host = std::env::var("CHATTER_HOST").unwrap_or_else(|_| cli.host.clone());
+    let port: u16 = std::env::var("CHATTER_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(cli.port);
+    let addr = format!("{host}:{port}");
 
     let state: PeerMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
 
