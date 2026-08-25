@@ -12,10 +12,7 @@ pub fn resolve_sender(current_login: &str, remote_login: &str) -> String {
 /// Format a Unix timestamp as "HH:MM" for use inside chat message bubbles.
 pub fn format_timestamp_bubble(timestamp: i64) -> String {
     DateTime::<Utc>::from_timestamp(timestamp, 0)
-        .map_or_else(
-            || "??:??".to_string(),
-            |dt| dt.format("%H:%M").to_string(),
-        )
+        .map_or_else(|| "??:??".to_string(), |dt| dt.format("%H:%M").to_string())
 }
 
 /// Return a date separator label for chat messages.
@@ -38,7 +35,7 @@ pub fn format_date_separator(timestamp: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_timestamp_bubble, format_date_separator};
+    use super::{format_date_separator, format_timestamp_bubble};
 
     #[test]
     fn bubble_uses_only_time() {
