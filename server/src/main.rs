@@ -2,8 +2,8 @@ use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -11,7 +11,7 @@ use std::{
 use clap::Parser;
 
 use futures_channel::mpsc::UnboundedSender;
-use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
+use futures_util::{StreamExt, future, pin_mut, stream::TryStreamExt};
 
 use anyhow::Context;
 use log::{error, info, warn};
@@ -410,7 +410,6 @@ async fn process_data(
             if let Ok((history, has_more)) = run_account_task({
                 let account_db = account_db.clone();
                 let room = room.clone();
-                let cursor = cursor.clone();
                 move || account_db.get_room_history(room, cursor, HISTORY_PAGE_SIZE)
             })
             .await
@@ -421,9 +420,7 @@ async fn process_data(
         chatter_protocol::ClientMessage::Logout => {
             info!("Logout requested by peer at {}", addr);
             let login = {
-                let mut peers = peer_map
-                    .write()
-                    .expect("Peer map RwLock poisoned");
+                let mut peers = peer_map.write().expect("Peer map RwLock poisoned");
                 peers.get_mut(&addr).map(|peer| {
                     let rooms: Vec<String> = peer.rooms.iter().cloned().collect();
                     let login = peer.login.clone();
@@ -434,12 +431,7 @@ async fn process_data(
             if let Some((rooms, login)) = login {
                 announce_room_departures(&peer_map, &addr, &login, rooms);
             }
-            send_server_message(
-                &peer_map,
-                addr,
-                chatter_protocol::ServerMessage::LogoutOk,
-            )
-            .ok();
+            send_server_message(&peer_map, addr, chatter_protocol::ServerMessage::LogoutOk).ok();
         }
     }
 }
@@ -490,7 +482,11 @@ pub(crate) fn send_history(
     send_server_message(
         peer_map,
         addr,
-        chatter_protocol::ServerMessage::RoomHistory { room, messages, has_more },
+        chatter_protocol::ServerMessage::RoomHistory {
+            room,
+            messages,
+            has_more,
+        },
     )
 }
 
@@ -699,12 +695,11 @@ fn set_authenticated_peer(
         .iter()
         .find(|(_, peer)| peer.login == login && peer.login != RESERVED_ANONYMOUS_LOGIN)
         .map(|(k, _)| *k)
+        && old_addr != addr
     {
-        if old_addr != addr {
-            return Err(chatter_protocol::ServerMessage::LoginFailed {
-                reason: "Login already in use. Please try again.".to_string(),
-            });
-        }
+        return Err(chatter_protocol::ServerMessage::LoginFailed {
+            reason: "Login already in use. Please try again.".to_string(),
+        });
     }
 
     let peer = peers.get_mut(&addr).ok_or_else(session_not_found_error)?;
@@ -713,11 +708,13 @@ fn set_authenticated_peer(
     peer.login = login;
     peer.rooms.clear();
 
-    Ok(if old_login != RESERVED_ANONYMOUS_LOGIN && !old_rooms.is_empty() {
-        Some((old_login, old_rooms))
-    } else {
-        None
-    })
+    Ok(
+        if old_login != RESERVED_ANONYMOUS_LOGIN && !old_rooms.is_empty() {
+            Some((old_login, old_rooms))
+        } else {
+            None
+        },
+    )
 }
 
 fn clear_peer_authentication(
@@ -929,8 +926,7 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::var("DB_PATH").ok())
         .unwrap_or_else(|| "chatter.db".to_string());
 
-    let account_db =
-        Account::new(db_path).context("Failed to initialize database")?;
+    let account_db = Account::new(db_path).context("Failed to initialize database")?;
 
     let addr = format!("{}:{}", cli.host, cli.port);
 
@@ -1478,7 +1474,9 @@ mod tests {
         let mut peer = Peer::new(
             tx,
             "alice".to_string(),
-            vec!["general".to_string(), "random".to_string()].into_iter().collect(),
+            vec!["general".to_string(), "random".to_string()]
+                .into_iter()
+                .collect(),
         );
 
         assert!(peer.is_authenticated);

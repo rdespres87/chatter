@@ -1,11 +1,11 @@
+use futures_util::{SinkExt, StreamExt};
 use std::{sync::Arc, time::Duration};
+use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
 };
-use tokio::net::TcpStream;
-use futures_util::{StreamExt, SinkExt};
 
 use chatter_protocol::ClientMessage;
 
@@ -18,27 +18,26 @@ pub(crate) const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ── WebSocket types ───────────────────────────────────────────────────────
 
-type WsSink = futures_util::stream::SplitSink<
-    WebSocketStream<MaybeTlsStream<TcpStream>>,
-    Message,
->;
+type WsSink = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 pub(crate) type SharedSink = Arc<Mutex<Option<WsSink>>>;
 
-type WsRead = futures_util::stream::SplitStream<
-    WebSocketStream<MaybeTlsStream<TcpStream>>,
->;
+type WsRead = futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 pub(crate) type SharedRead = Arc<Mutex<Option<WsRead>>>;
 
 // ── AppEvent ──────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 pub enum AppEvent {
-    ReceivedMsg { data: Message },
+    ReceivedMsg {
+        data: Message,
+    },
     Disconnected {
         close_code: Option<u16>,
         close_reason: Option<String>,
     },
-    ConnectionError { reason: String },
+    ConnectionError {
+        reason: String,
+    },
     Reconnected,
 }
 
@@ -88,10 +87,10 @@ async fn start_reader_and_heartbeat(
     let sink_for_reader = sink.clone();
     tokio::spawn(async move {
         // Send initial message if provided (ensures reader is listening first)
-        if let Some(msg) = initial_message {
-            if let Some(ws) = sink_for_reader.lock().await.as_mut() {
-                let _ = ws.send(Message::Text(msg.into())).await;
-            }
+        if let Some(msg) = initial_message
+            && let Some(ws) = sink_for_reader.lock().await.as_mut()
+        {
+            let _ = ws.send(Message::Text(msg.into())).await;
         }
         while let Some(result) = read.next().await {
             match result {
@@ -170,8 +169,7 @@ pub async fn reconnect_attempt(
                 let (write, read) = socket.split();
                 *sink.lock().await = Some(write);
                 *initial_read.lock().await = Some(read);
-                let initial_msg = if let (Some(l), Some(p)) =
-                    (login.as_ref(), password.as_ref())
+                let initial_msg = if let (Some(l), Some(p)) = (login.as_ref(), password.as_ref())
                     && !l.is_empty()
                     && !p.is_empty()
                 {
@@ -242,8 +240,6 @@ impl EventHandler {
         notify: Arc<Notify>,
         events_tx: mpsc::UnboundedSender<AppEvent>,
     ) {
-        self._connect_handle = Some(spawn_connection(
-            url, sink, initial_read, events_tx, notify,
-        ));
+        self._connect_handle = Some(spawn_connection(url, sink, initial_read, events_tx, notify));
     }
 }

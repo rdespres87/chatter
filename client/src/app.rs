@@ -2,11 +2,11 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use chrono::{DateTime, NaiveDate, Utc};
 use futures_util::{FutureExt, SinkExt};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::tungstenite::protocol::Message;
 
+use crate::events::{AppEvent, EventHandler, MAX_HISTORY, SharedRead, SharedSink};
 use chatter_protocol::{ClientMessage, ServerMessage};
-use crate::events::{AppEvent, EventHandler, SharedSink, SharedRead, MAX_HISTORY};
 
 use crate::utils::{format_date_separator, format_timestamp_bubble, resolve_sender};
 
@@ -148,13 +148,13 @@ impl App {
     pub async fn new(url: String) -> Self {
         let (mut event_handler, ws_sink, initial_read, connect_notify) = EventHandler::new();
         let (action_tx, action_rx) = mpsc::unbounded_channel();
-        let events_tx = event_handler.events_tx();  // clone stored in App for reconnect
+        let events_tx = event_handler.events_tx(); // clone stored in App for reconnect
         event_handler.connect(
             url.clone(),
             ws_sink.clone(),
             initial_read.clone(),
             connect_notify.clone(),
-            events_tx.clone(),  // clone for connect, keep original for App struct
+            events_tx.clone(), // clone for connect, keep original for App struct
         );
         Self {
             url,
@@ -464,7 +464,7 @@ impl App {
     }
     fn reset_room_on_disconnect(&mut self) {
         // If we were in a room, leave it before resetting (matches ratatui reconnect behavior).
-        let prev_room = std::mem::replace(&mut self.room, String::new());
+        let prev_room = std::mem::take(&mut self.room);
         if !prev_room.is_empty() {
             self.pending_actions
                 .push(PendingAction::LeaveRoom { room: prev_room });
@@ -522,7 +522,7 @@ impl App {
         self.messages.insert(
             id,
             MessageEntry {
-                id: id, // local echo placeholder; server will confirm with real id
+                id, // local echo placeholder; server will confirm with real id
                 sender: resolve_sender(&self.login, &self.login),
                 content: message.clone(),
                 timestamp: now,
@@ -991,6 +991,7 @@ impl App {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_bubble(
         ui: &mut egui::Ui,
         sender: &str,
@@ -1040,6 +1041,7 @@ impl App {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_bubble_inner(
         ui: &mut egui::Ui,
         sender: &str,
@@ -1064,11 +1066,9 @@ impl App {
         };
 
         // Sender: pas de wrapping (toujours une ligne)
-        let sender_galley = ui.painter().layout_no_wrap(
-            sender_text.clone(),
-            sender_font.clone(),
-            sender_color,
-        );
+        let sender_galley =
+            ui.painter()
+                .layout_no_wrap(sender_text.clone(), sender_font.clone(), sender_color);
         let sender_size = sender_galley.size();
 
         // Content: measure WITH wrapping to get the actual height
@@ -1162,7 +1162,7 @@ impl App {
         let corner_radius = 10.0;
         let mut last_date: Option<NaiveDate> = None;
 
-        for (_id, message) in &self.messages {
+        for message in self.messages.values() {
             match &message.msg_type {
                 MessageType::System(content) => {
                     ui.horizontal(|ui| {

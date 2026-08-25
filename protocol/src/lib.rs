@@ -139,7 +139,10 @@ fn validate_required_text(value: &str, field: &str, max_len: usize) -> Result<()
 }
 
 fn validate_no_control_chars(value: &str, field: &str) -> Result<()> {
-    if value.chars().any(|c| c.is_control() && c != '\n' && c != '\r') {
+    if value
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\r')
+    {
         bail!("{field} cannot contain control characters");
     }
     Ok(())
@@ -277,8 +280,7 @@ pub fn validate_client_message(msg: &mut ClientMessage) -> Result<()> {
             validate_legacy_login(login)?;
             validate_login_password(passwd)?;
         }
-        ClientMessage::JoinRoom { room }
-        | ClientMessage::LeaveRoom { room } => {
+        ClientMessage::JoinRoom { room } | ClientMessage::LeaveRoom { room } => {
             normalize_required_field(room);
             validate_room(room)?;
         }
@@ -362,7 +364,7 @@ fn normalized_client_message(message: &ClientMessage) -> Result<Cow<'_, ClientMe
             } else {
                 Ok(Cow::Owned(ClientMessage::GetHistory {
                     room: room.into_owned(),
-                    cursor: cursor.clone(),
+                    cursor: *cursor,
                 }))
             }
         }
