@@ -205,7 +205,7 @@ pub struct EventHandler {
 
 impl EventHandler {
     /// Create the event channel pair, WebSocket shared state, and connection notify.
-    /// Returns (EventHandler, SharedSink, SharedRead, Arc<Notify>).
+    /// Returns (EventHandler, SharedSink, SharedRead, Arc\<Notify\>).
     pub fn new() -> (Self, SharedSink, SharedRead, Arc<Notify>) {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let ws_sink: SharedSink = Arc::new(Mutex::new(None));
