@@ -1,0 +1,19 @@
+services:
+  # ------------------------------------------------
+  # Chatter server (WebSocket + SQLite)
+  # ------------------------------------------------
+  server:
+    build: .
+    ports:
+      - "12345:12345"                    # host:container
+    volumes:
+      # Persist the SQLite database
+      - chatter_data:/app/data
+    environment:
+      - RUST_LOG=info
+      # Optional: override the database path if you change the code later
+      # - DB_PATH=/app/data/chatter.db
+    restart: unless-stopped
+
+volumes:
+  chatter_data:
