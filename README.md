@@ -2,64 +2,259 @@
 
 WebSocket chat application with an egui desktop client, written in Rust.
 
-## Architecture
+## Table of Contents
 
-The project is organized as a Cargo workspace with three independent crates:
+- [Project Structure](#project-structure)
+- [Technical Choices](#technical-choices)
+- [Crate Dependencies](#crate-dependencies)
+- [Architecture Overview](#architecture-overview)
+- [Features](#features)
+- [Limitations](#limitations)
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Build & Run](#build--run)
+  - [Docker](#docker)
+- [Testing](#testing)
 
-```
+## Project Structure
+
+```text
 chatter/
-├── protocol/   # Shared message types and serialization (binary: none)
-├── server/     # WebSocket server (tokio-tungstenite + SQLite) (binary: server)
-└── client/     # egui desktop chat client (binary: chatter)
+├── Cargo.toml              # Workspace manifest (Rust 2024 edition)
+├── Cargo.lock
+├── README.md
+├── docker-compose.yml      # Docker Compose for server deployment
+├── Dockerfile              # Multi-stage Docker build (server only)
+├── .dockerignore
+├── chatter.db              # Default SQLite database (created at runtime)
+│
+├── protocol/               # Shared message types crate
+│   ├── Cargo.toml
+│   └── src/
+│       └── lib.rs          # Message enums, serialization, history types
+│
+├── server/                 # WebSocket server crate
+│   ├── Cargo.toml
+│   └── src/
+│       ├── main.rs         # Server entry point, CLI args, WebSocket handler
+│       └── account.rs      # Account management (create, login, bcrypt)
+│
+└── client/                 # egui desktop client crate
+    ├── Cargo.toml
+    └── src/
+        ├── main.rs         # Client entry point, CLI args, WebSocket connection
+        ├── app.rs          # egui application (splash screen, chat UI)
+        ├── events.rs       # Event loop, auto-reconnect logic
+        └── utils.rs        # Helper functions (username display, etc.)
 ```
 
-### Protocol Crate (`protocol/`)
+## Technical Choices
 
-Defines all message types for client-server communication:
+### Protocol — JSON over WebSocket
 
-- **ClientMessage**: `Login`, `CreateAccount`, `JoinRoom`, `LeaveRoom`, `SendMessage`, `GetHistory`
-- **ServerMessage**: `LoginOk`, `LoginFailed`, `AccountCreated`, `AccountCreationFailed`, `RoomList`, `RoomHistory`, `IncomingMessage`, `Error`, `Welcome`
-- **HistoryEntry**: Struct for room history entries
+The client and server communicate via **WebSocket** using the `tungstenite`
+crate, with messages serialized as **JSON**. This choice provides:
 
-All types implement `serde::Serialize` and `serde::Deserialize`.
+- **Text-based framing**: JSON is human-readable for debugging and works
+  naturally with serde's serialization.
+- **Bidirectional communication**: WebSocket enables real-time push from server
+  to client (incoming messages, room list updates) without polling.
+- **Cross-platform**: WebSocket works through most firewalls and proxies,
+  unlike raw TCP.
 
-### Server Crate (`server/`)
+Messages are defined in the `protocol` crate as Rust enums with serde derive
+macros. The two main message directions are `ClientMessage` (CreateAccount,
+Login, JoinRoom, LeaveRoom, SendMessage, GetHistory, Logout) and
+`ServerMessage` (LoginOk, LoginFailed, AccountCreated, AccountCreationFailed,
+IncomingMessage, RoomList, RoomHistory, LogoutOk, Error).
 
-WebSocket chat server built with:
+### Persistence — SQLite via rusqlite
 
-- **tokio-tungstenite** — WebSocket protocol handling
-- **SQLite** (via `rusqlite`) — Account storage with bcrypt password hashing
-- Room-based message broadcasting
-- Login rate limiting with exponential backoff
-- Room history retrieval (all messages, limited by i32::MAX)
+The server uses **SQLite** (through the `rusqlite` crate) for persistent
+storage:
 
-Listens on port `8080` by default.
+- **Accounts**: Username and bcrypt-hashed passwords are stored in an SQLite
+  database. The `account.rs` module handles account creation and login
+  verification.
+- **Messages**: Chat messages are persisted room-by-room with cursor-based
+  pagination. Each message stores the sender, content, and timestamp.
 
-### Client Crate (`client/`)
+SQLite was chosen for its zero-configuration, single-file deployment model —
+ideal for a small-to-medium chat server that doesn't need concurrent write
+scaling. The database file path is configurable via the `--db` CLI flag
+(default: `chatter.db`, or the `DB_PATH` environment variable).
 
-Desktop chat client built with:
+### Concurrency — tokio async runtime
 
-|- **egui** + **eframe** — GPU-accelerated 2D GUI (OpenGL via wgpu)
-|- **tokio-tungstenite** — WebSocket client with auto-reconnect
-|- Splash screen with Login/Register flow
-|- Password input with character-by-character editing
-|- Chat room interface with message history scrolling
-|- Room list sidebar with left-click navigation
+The server runs on **tokio**, Rust's asynchronous runtime:
+
+- **Per-client tasks**: Each connected WebSocket client is handled by an
+  independent async task spawned via `tokio::spawn`. This allows the server to
+  manage thousands of concurrent connections without blocking.
+- **Shared state**: Client rooms and message history are protected by
+  `tokio::sync::Mutex` (or `RwLock`) to allow safe concurrent access across
+  tasks.
+- **Heartbeat/disconnect detection**: The server detects disconnection when a
+  WebSocket Close frame is received. Clients are removed from all rooms and
+  notified to other participants.
+- **Room broadcasting**: When a message is received, the server broadcasts it
+  to all other clients in the same room using async task spawning.
+
+The client also runs on tokio for its WebSocket connection management, enabling
+non-blocking I/O during reconnection attempts.
+
+## Crate Dependencies
+
+### `protocol` — Shared types between client and server
+
+| Crate | Version | Why |
+| ----- | ------- | --- |
+| `serde` + `serde_json` | 1.0 | JSON serialization for message types. |
+| `anyhow` | 1.0 | Error handling with context chaining. |
+| `tungstenite` | 0.29 | WebSocket transport Message type. |
+
+### `server` — WebSocket chat server
+
+| Crate | Version | Why |
+| ----- | ------- | --- |
+| `tokio` + `tokio-tungstenite` | 1.x / 0.29 | Async runtime + WebSocket. |
+| `futures-channel` | 0.3 | Unbounded channel for peer messaging. |
+| `futures-util` | 0.3 | Async stream/sink combinators (sink+std). |
+| `rusqlite` | 0.40 | SQLite for persistent storage (bundled). |
+| `bcrypt` | 0.19 | Password hashing. |
+| `clap` + `serde` | 4.x / 1.0 | CLI args with derive macros. |
+| `log` + `env_logger` | 0.4 / 0.11 | Structured logging with filtering. |
+| `ctrlc` | 3.4 | Graceful shutdown on SIGINT/SIGTERM. |
+| `zeroize` | 1.8 | Secure memory clearing for secrets. |
+| `chatter_protocol` | local | Shared message types. |
+| `serde_json` | 1.0 | JSON for WebSocket payloads. |
+
+### `client` — egui desktop chat client
+
+| Crate | Version | Why |
+| ----- | ------- | --- |
+| `egui` + `eframe` | 0.35 | Immediate-mode GUI (OpenGL via glow). |
+| `egui_extras` | 0.35 | Extra egui widgets and features. |
+| `tokio` + `tokio-tungstenite` | 1.x / 0.29 | Async WebSocket connection. |
+| `futures-util` | 0.3 | Async stream/sink combinators (StreamExt, SinkExt). |
+| `clap` + `serde` | 4.x / 1.0 | CLI args for URL and port. |
+| `log` + `env_logger` | 0.4 / 0.11 | Client-side debug logging. |
+| `color-eyre` | 0.6 | Error reporting with backtraces. |
+| `chrono` | 0.4 | Timestamp formatting for messages. |
+| `chatter_protocol` | local | Shared message types. |
+| `serde_json` | 1.0 | JSON for WebSocket payloads. |
+
+## Architecture Overview
+
+```text
++--------------------------------------------------------------+
+|                     Client (egui)                            |
+|  +----------+  +----------+  +------------------------------+|
+|  | Splash   |  | Chat UI  |  | WebSocket (tokio)            ||
+|  | Login/   |->| Room     |  | JSON messages                ||
+|  | Register |  | Sidebar  |  | Auto-reconnect               ||
+|  +----------+  +----------+  +------------------------------+|
+|                                               | WebSocket   ||
++-----------------------------------------------|--------------+
+                                                |
+                                                v
++--------------------------------------------------------------+
+|                   Server (tokio)                             |
+|  +----------+  +----------+  +------------------------------+|
+|  | WebSocket|->| Room     | ->| SQLite (rusqlite)           ||
+|  | Handler  |  | Manager  |   | Accounts +                  ||
+|  | (tokio)  |  | (broadcast)| Messages                      ||
+|  +----------+  +----------+  +------------------------------+|
+|  +----------+                                               ||
+|  | Account  |  bcrypt password hashing                      ||
+|  | Manager  |                                               ||
+|  +----------+                                               ||
+|  +----------+                                               ||
+|  | Heartbeat|  Close frame disconnect detection             ||
+|  +----------+                                               ||
++--------------------------------------------------------------+
+```
+
+## Features
+
+### Server
+
+- **Room-based messaging**: Clients join rooms and receive messages from all
+  participants in real-time.
+- **Account system**: Registration and login with bcrypt-hashed passwords
+  stored in SQLite.
+- **Room history with cursor pagination**: When joining a room, clients receive
+  the latest 100 messages. Older messages can be fetched by providing a cursor
+  (oldest message ID seen).
+- **Room listing**: Clients receive the list of available rooms on login and
+  when rooms change.
+- **Heartbeat/disconnect detection**: Server detects disconnection when a
+  WebSocket Close frame is received. Clients are automatically removed from
+  their rooms and notified to other participants.
+- **Login brute-force protection**: Exponential backoff on repeated failed
+  login/account attempts (10ms base, up to 8s max).
+- **Concurrent account task limiting**: Maximum 64 concurrent blocking account
+  tasks (bcrypt hashing, DB queries) to prevent resource exhaustion.
+- **Configurable deployment**: Host, port, and database path are configurable
+  via CLI flags or the `DB_PATH` environment variable.
+
+### Client
+
+- **Splash screen with authentication**: Login/Register flow with form
+  validation.
+- **Chat room interface**: Real-time message display with scrolling history,
+  room sidebar for navigation (left-click to switch rooms).
+- **Auto-reconnect**: If the WebSocket connection drops, the client
+  automatically attempts to reconnect with exponential backoff (starting at
+  1s, doubling up to 30s max).
+- **CLI mode**: Connect to a server from the command line with `--url` and
+  `-p/--port` flags.
+- **Password input**: Masked password field during login/registration.
+
+## Limitations
+
+- **Single-server deployment**: No support for horizontal scaling across
+  multiple server instances. Each server manages its own SQLite database and
+  in-memory room state.
+- **No message encryption**: WebSocket connections use plain text (ws://). TLS
+  (wss://) is not currently supported. The server prints a security notice on
+  startup reminding operators to deploy behind a TLS-terminating reverse proxy.
+- **No file/image sharing**: Only text messages are supported.
+- **No direct messaging (DMs)**: All messages are room-scoped; there is no
+  private messaging between individual users.
+- **No message editing/deletion**: Once sent, messages cannot be modified or
+  removed.
+- **Limited history pagination**: The initial room history fetch returns at most
+  100 messages. Older messages are loaded on-demand when the user scrolls to
+  the top of the chat area (cursor-based pagination). There is no explicit
+  "Load Older" button — loading is triggered automatically by scroll position.
+- **No rate limiting**: The server does not currently limit the rate of messages
+  per client, which could be exploited for flooding.
+- **No typing indicators or presence**: Users cannot see who is online or when
+  someone is typing.
+- **Client is desktop-only**: The egui client requires a native OS window (no
+  web/WASM export yet).
 
 ## Getting Started
 
 ### Prerequisites
 
-- Rust 1.70+ (stable toolchain)
+- Rust 1.85+ (stable toolchain, Rust 2024 edition)
+- C compiler (`cc`) — required by `libsqlite3-sys`'s `bundled` feature on Linux
 
-### Build and Run
+### Build & Run
 
 ```bash
 # Build the entire workspace
 cargo build --release
+
+# Build only a specific crate
+cargo check -p protocol   # Protocol types only
+cargo check -p server     # Server (depends on protocol)
+cargo check -p client     # Client (depends on protocol)
 ```
 
-#### Server
+#### Server Configuration
 
 The server accepts CLI arguments for host, port, and database path:
 
@@ -68,18 +263,22 @@ The server accepts CLI arguments for host, port, and database path:
 cargo run -p server
 
 # Custom host and port
-cargo run -p server -- --host 0.0.0.0 --port 9000
+cargo run -p server -- --host 127.0.0.1 --port 9000
 
-# Bind to a specific interface (all interfaces on default port)
-cargo run -p server -- --host 0.0.0.0
+# Custom database path
+cargo run -p server -- --db /tmp/chat.db
+
+# Using the DB_PATH environment variable
+DB_PATH=/tmp/chat.db cargo run -p server
 ```
 
 **Server CLI options:**
 
 | Option | Default | Description |
-|--------|---------|-------------|
+| ------ | ------- | ----------- |
 | `--host` | `127.0.0.1` | Host to bind the server to |
-| `--port` | `8080` | Port to listen on |
+| `-p, --port` | `8080` | Port to listen on |
+| `--db` | `chatter.db` | Path to the SQLite database file |
 
 **Log levels:**
 
@@ -94,42 +293,37 @@ RUST_LOG=warn cargo run -p server
 RUST_LOG=server::account=info cargo run -p server
 ```
 
-#### Client
+#### Client Configuration
 
-The client accepts CLI arguments for server URL, port, and username:
+The client accepts CLI arguments for server URL and port override:
 
 ```bash
-# Default: connect to ws://localhost:8080 with interactive login
+# Interactive mode (prompts for connection details and credentials)
 cargo run -p client
 
-# Connect to a custom server address
-cargo run -p client -- --url ws://192.168.1.10:9000
+# CLI mode: connect to a custom server address
+cargo run -p client -- --url ws://127.0.0.1:8080
+
+# Override the port from the URL
+cargo run -p client -- --url ws://127.0.0.1 --port 9000
 ```
 
 **Client CLI options:**
 
 | Option | Default | Description |
-|--------|---------|-------------|
+| ------ | ------- | ----------- |
 | `--url` | `ws://localhost:8080` | WebSocket server URL |
-| `-p, --port` | (extracted from URL) | Server port (overrides URL port) |
+| `-p, --port` | (extracted from URL) | Server port override |
 
-**Note:** The `--url` option takes precedence over `--port`. If only `--port` is provided, it overrides the corresponding value in the URL.
-
-### Running Tests
-
-```bash
-# Run all tests in the workspace
-cargo test --workspace
-
-# Run tests for a specific crate
-cargo test -p protocol
-cargo test -p server
-cargo test -p client
-```
+**Note:** The `--url` option takes precedence over `--port`. If only `--port`
+is provided, it overrides the corresponding value in the URL. In CLI mode
+(`--url` or `--port` provided), the client skips the splash screen and attempts
+to connect directly.
 
 ## Docker
 
-The project can be built and run inside a Docker container. Only the server is containerized (the client is a native egui desktop app).
+The project can be built and run inside a Docker container. Only the server is
+containerized (the client is a native egui desktop app).
 
 ### Quick Start
 
@@ -137,7 +331,7 @@ The project can be built and run inside a Docker container. Only the server is c
 # Build the Docker image
 docker build -t chatter-server .
 
-# Run in detached mode (background)
+# Run with docker compose (recommended)
 docker compose up -d
 
 # View server logs in real-time
@@ -145,47 +339,35 @@ docker compose logs -f server
 
 # Stop and remove the container
 docker compose down
-```
 
-### Full Docker Compose Commands
-
-| Command | Description |
-|---------|-------------|
-| `docker compose up -d` | Build and start the server in detached mode |
-| `docker compose logs -f server` | Follow server logs in real-time |
-| `docker compose ps` | Show running containers |
-| `docker compose down` | Stop and remove the container + network |
-| `docker compose down -v` | Stop, remove container + named volume (clears SQLite data) |
-| `docker compose build --no-cache` | Rebuild image from scratch (no cache) |
-
-### Architecture
-
-The Dockerfile uses a **multi-stage build** to keep the final image small:
-
-1. **Builder stage** (`rust:1.85-bookworm`): Compiles the server in release mode
-2. **Runtime stage** (`debian:bookworm-slim`): Contains only the compiled binary + CA certificates
-
-The server runs as a non-root user (`appuser`) for security.
-
-### Configuration
-
-| Environment Variable | Default | Description |
-|---------------------|---------|-------------|
-| `RUST_LOG` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
-
-The server listens on port `12345` by default inside the container. The host port is mapped via `docker-compose.yml`.
-
-### Database Persistence
-
-The SQLite database is stored in a named Docker volume (`chatter_data`) mounted at `/app/data` inside the container. Data survives container restarts.
-
-To start fresh (delete all data):
-```bash
+# Stop and remove the container + clear database
 docker compose down -v
-docker compose up -d
 ```
 
-### Building Without Docker Compose
+### Docker Compose Configuration
+
+The `docker-compose.yml` file defines:
+
+- **Server service**: Built from the Dockerfile, exposed on port 12345.
+- **Persistent volume**: `chatter_data` mounts at `/app/data` inside the
+  container for SQLite persistence.
+- **Auto-restart**: `restart: unless-stopped` ensures the server recovers from
+  crashes.
+- **Logging**: `RUST_LOG=info` sets the default log level.
+
+### Dockerfile (Multi-stage Build)
+
+The Dockerfile uses a two-stage build to minimize the final image size:
+
+1. **Builder stage** (`rust:1.85-bookworm`): Compiles the server in release
+   mode. The client is excluded from the workspace during build via `sed`.
+2. **Runtime stage** (`debian:bookworm-slim`): Contains only the compiled
+   binary, CA certificates, and a non-root user (`appuser`).
+
+The server runs as `appuser` (UID 1000) for security. The default database path
+inside the container is `/app/data/chatter.db`.
+
+### Running Without Docker Compose
 
 ```bash
 # Build the image
@@ -200,21 +382,24 @@ docker run -d \
   --restart unless-stopped \
   chatter-server
 
-# Stop
+# Stop and remove
 docker stop chatter-server && docker rm chatter-server
 ```
 
-## Project Structure
-
-Each crate can be compiled independently:
+## Testing
 
 ```bash
-cargo check -p protocol   # Protocol only
-cargo check -p server     # Server (depends on protocol)
-cargo check -p client     # Client (depends on protocol)
-```
+# Run all tests in the workspace
+cargo test --workspace
 
-This allows building and testing each component in isolation.
+# Run tests for a specific crate
+cargo test -p protocol
+cargo test -p server
+cargo test -p client
+
+# Run tests with output visible
+cargo test --workspace -- --nocapture
+```
 
 ## License
 
