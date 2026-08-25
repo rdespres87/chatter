@@ -138,6 +138,10 @@ pub struct App {
     has_more_history: bool,
     /// Whether the user scrolled up in the message list (triggers auto-load at top).
     has_scrolled_up: bool,
+    /// True while a JoinRoom/GetHistory sequence is in flight.
+    /// Prevents IncomingMessage from being processed before RoomHistory loads,
+    /// avoiding a race where live messages are inserted then wiped by RoomHistory.clear().
+    room_join_pending: bool,
     /// Monotonically increasing counter for system message ids.
     system_message_id: u64,
     /// Error message displayed on auth screens (login/password).
@@ -190,6 +194,7 @@ impl App {
             loading_older: false,
             has_more_history: false,
             has_scrolled_up: false,
+            room_join_pending: false,
             system_message_id: 1000, // Start above normal message ids
             auth_error: None,
         }
@@ -240,6 +245,12 @@ impl App {
                 ref message,
                 timestamp,
             } => {
+                // If we're in the middle of a JoinRoom/GetHistory sequence,
+                // discard IncomingMessage to avoid a race where the message
+                // is inserted into self.messages then wiped by RoomHistory.clear().
+                if self.room_join_pending {
+                    return;
+                }
                 if *login == "Server" && room == "system" {
                     let sys_id = self.system_message_id;
                     self.system_message_id += 1;
@@ -271,6 +282,9 @@ impl App {
             } => {
                 // If this RoomHistory is for a room we're no longer in, ignore it.
                 if self.room == room {
+                    // Close the join window — IncomingMessage can now be processed.
+                    self.room_join_pending = false;
+
                     // Track oldest message id for next cursor
                     let new_oldest = messages.iter().min_by_key(|e| e.id).map(|e| e.id);
 
@@ -438,6 +452,8 @@ impl App {
         }
         self.room = room.clone();
         self.input_mode = InputMode::Normal;
+        // Block IncomingMessage processing until RoomHistory arrives.
+        self.room_join_pending = true;
         // Clear messages now — RoomHistory handler will replace them.
         self.messages.clear();
         self.oldest_message_id = None;
