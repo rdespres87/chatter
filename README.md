@@ -239,7 +239,7 @@ non-blocking I/O during reconnection attempts.
 
 ### Prerequisites
 
-- Rust 1.85+ (stable toolchain, Rust 2024 edition)
+- Rust 1.95+ (stable toolchain, Rust 2024 edition)
 - C compiler (`cc`) — required by `libsqlite3-sys`'s `bundled` feature on Linux
 
 ### Build & Run
@@ -359,7 +359,7 @@ The `docker-compose.yml` file defines:
 
 The Dockerfile uses a two-stage build to minimize the final image size:
 
-1. **Builder stage** (`rust:1.85-bookworm`): Compiles the server in release
+1. **Builder stage** (`rust:1.95-bookworm`): Compiles the server in release
    mode. The client is excluded from the workspace during build via `sed`.
 2. **Runtime stage** (`debian:bookworm-slim`): Contains only the compiled
    binary, CA certificates, and a non-root user (`appuser`).
