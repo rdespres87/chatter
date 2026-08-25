@@ -782,7 +782,8 @@ fn authenticated_login(
         .map(|peer| peer.login.clone())
         .ok_or_else(session_not_found_error)?;
 
-    if login == RESERVED_ANONYMOUS_LOGIN {
+    // Unauthenticated: sentinel value or post-logout (login cleared to "")
+    if login == RESERVED_ANONYMOUS_LOGIN || login.is_empty() {
         Err(client_error_with_code(
             "Login required.",
             "NOT_AUTHENTICATED",
@@ -1070,6 +1071,26 @@ mod tests {
                 "NOT_AUTHENTICATED"
             )),
             "An unauthenticated (anonymous) peer must not expose a login"
+        );
+    }
+
+    #[test]
+    fn test_post_logout_has_no_authenticated_login() {
+        // Regression test for S1: after logout, login is cleared to "".
+        // authenticated_login must reject this (not treat it as authenticated).
+        let addr = test_addr(8090);
+        let (tx, _rx) = futures_channel::mpsc::unbounded();
+
+        // Simulate post-logout state: login cleared to ""
+        let peer_map = make_peer_map(vec![(addr, tx, "".to_string(), vec![])]);
+
+        assert_eq!(
+            authenticated_login(&peer_map, addr),
+            Err(client_error_with_code(
+                "Login required.",
+                "NOT_AUTHENTICATED"
+            )),
+            "A post-logout peer (empty login) must not expose a login"
         );
     }
 
