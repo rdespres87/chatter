@@ -26,8 +26,8 @@ type Tx = UnboundedSender<Message>;
 
 const TRANSPORT_SECURITY_NOTICE: &str = "SECURITY: this server accepts plain ws:// connections. Deploy it only behind a TLS-terminating reverse proxy (wss:// to clients), otherwise credentials cross the network in cleartext.";
 
-/// Number of messages per page for cursor-based pagination.
-pub(crate) const HISTORY_PAGE_SIZE: usize = 100;
+/// Re-export protocol constant for history page size.
+use chatter_protocol::HISTORY_PAGE_SIZE;
 
 const MAX_CONCURRENT_ACCOUNT_TASKS: usize = 64;
 const ACCOUNT_TASK_RETRY_DELAY_MS: u64 = 10;

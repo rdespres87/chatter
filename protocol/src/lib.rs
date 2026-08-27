@@ -4,7 +4,12 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use tungstenite::protocol::Message;
 
-pub const MAX_PAYLOAD_LEN: usize = 256 * 1024;
+/// Maximum WebSocket text message size.
+/// 2 MB — accommodates a full 100-entry history page (~420 KB worst case).
+pub const MAX_PAYLOAD_LEN: usize = 2 * 1024 * 1024;
+/// Default number of history entries per page.
+/// Total payload: ~100 × ~4 KB ≈ 420 KB, well within MAX_PAYLOAD_LEN.
+pub const HISTORY_PAGE_SIZE: usize = 100;
 pub const MIN_LOGIN_LEN: usize = 2;
 /// Legacy protocol/display login limit. Existing SQLite rows may contain
 /// names created before the stricter account-creation policy.
@@ -440,7 +445,15 @@ pub fn serialize_client_message(message: &ClientMessage) -> Result<String> {
 
 pub fn serialize_server_message(message: &ServerMessage) -> Result<String> {
     validate_server_message(message)?;
-    Ok(serde_json::to_string(message)?)
+    let json = serde_json::to_string(message)?;
+    if json.len() > MAX_PAYLOAD_LEN {
+        bail!(
+            "serialized server message ({} bytes) exceeds MAX_PAYLOAD_LEN ({})",
+            json.len(),
+            MAX_PAYLOAD_LEN
+        );
+    }
+    Ok(json)
 }
 
 pub fn parse_client_message(data: Message) -> Result<ClientMessage> {
@@ -1021,6 +1034,67 @@ mod tests {
 
         assert!(serialize_server_message(&room_list).is_ok());
         assert!(serialize_server_message(&history).is_ok());
+    }
+
+    /// Regression test for history page payload size: a full 100-entry history
+    /// page with max-length messages (~420 KB) must serialize within MAX_PAYLOAD_LEN (2 MB).
+    #[test]
+    fn large_history_page_serializes_within_limit() {
+        let messages: Vec<HistoryEntry> = (0..HISTORY_PAGE_SIZE)
+            .map(|i| HistoryEntry {
+                id: i as u64,
+                login: "alice".to_string(),
+                message: "x".repeat(MAX_CHAT_MESSAGE_LEN), // 4096 chars
+                timestamp: 1_735_732_800 + i as i64,
+            })
+            .collect();
+
+        let msg = ServerMessage::RoomHistory {
+            room: "general".to_string(),
+            messages,
+            has_more: false,
+        };
+
+        let json = serialize_server_message(&msg).unwrap();
+        assert!(
+            json.len() < MAX_PAYLOAD_LEN,
+            "history page serialized size {} bytes exceeds limit {} bytes",
+            json.len(),
+            MAX_PAYLOAD_LEN
+        );
+    }
+
+    /// Verify that serialize_server_message rejects payloads exceeding MAX_PAYLOAD_LEN.
+    #[test]
+    fn serialize_server_message_rejects_too_large() {
+        // Build a RoomHistory with enough entries to exceed 2 MB.
+        // Each entry ≈ 4 KB, so ~600 entries > 2 MB.
+        // MAX_HISTORY_ENTRIES is 1000, so 600 passes count validation.
+        let messages: Vec<HistoryEntry> = (0..600)
+            .map(|i| HistoryEntry {
+                id: i as u64,
+                login: "alice".to_string(),
+                message: "x".repeat(MAX_CHAT_MESSAGE_LEN), // 4096 chars
+                timestamp: 1_735_732_800 + i as i64,
+            })
+            .collect();
+
+        let msg = ServerMessage::RoomHistory {
+            room: "general".to_string(),
+            messages,
+            has_more: false,
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(
+            json.len() > MAX_PAYLOAD_LEN,
+            "generated {} bytes, need > {}",
+            json.len(),
+            MAX_PAYLOAD_LEN
+        );
+
+        let result = serialize_server_message(&msg);
+        assert!(result.is_err());
     }
 
     #[test]
