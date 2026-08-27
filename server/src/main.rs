@@ -16,6 +16,7 @@ use futures_util::{StreamExt, future, pin_mut, stream::TryStreamExt};
 use anyhow::Context;
 use log::{error, info, warn};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 
@@ -861,14 +862,19 @@ async fn handle_connection(
     raw_stream: TcpStream,
     addr: SocketAddr,
     rate_limiter: RateLimiter,
+    handshake_timeout: Duration,
 ) -> ServerResult {
     info!("Incoming TCP connection from: {}", addr);
 
     let mut ws_config = WebSocketConfig::default();
     ws_config.max_message_size = Some(chatter_protocol::MAX_PAYLOAD_LEN);
-    let ws_stream = tokio_tungstenite::accept_async_with_config(raw_stream, Some(ws_config))
-        .await
-        .with_context(|| format!("WebSocket handshake failed for {}", addr))?;
+    let ws_stream = tokio::time::timeout(
+        handshake_timeout,
+        tokio_tungstenite::accept_async_with_config(raw_stream, Some(ws_config)),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("WebSocket handshake timed out for {}", addr))?
+    .with_context(|| format!("WebSocket handshake failed for {}", addr))?;
     info!("WebSocket connection established: {}", addr);
 
     let (tx, rx) = futures_channel::mpsc::unbounded();
@@ -974,6 +980,14 @@ struct Cli {
     /// Defaults to the DB_PATH environment variable, or "chatter.db" if not set.
     #[arg(long)]
     db: Option<String>,
+
+    /// Maximum number of concurrent connections.
+    #[arg(long, default_value_t = 256)]
+    max_connections: usize,
+
+    /// WebSocket handshake timeout in seconds.
+    #[arg(long, default_value_t = 10)]
+    handshake_timeout_secs: u64,
 }
 
 #[tokio::main]
@@ -1053,6 +1067,10 @@ async fn main() -> anyhow::Result<()> {
     // Persistent backoff state keyed by IP (survives connection drops).
     let ip_backoff: IpBackoffMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
 
+    // Bounded connection pool to prevent resource exhaustion.
+    let connection_semaphore = Arc::new(Semaphore::new(cli.max_connections));
+    let handshake_timeout = Duration::from_secs(cli.handshake_timeout_secs);
+
     loop {
         tokio::select! {
             result = listener.accept() => {
@@ -1062,8 +1080,10 @@ async fn main() -> anyhow::Result<()> {
                         let db = account_db.clone();
                         let ip_bo = ip_backoff.clone();
                         let rate_limiter = RateLimiter::new(RATE_LIMIT, RATE_WINDOW_SECS);
+                        let semaphore = connection_semaphore.clone();
                         tasks.spawn(async move {
-                            if let Err(e) = handle_connection(state, ip_bo, db, stream, stream_addr, rate_limiter).await {
+                            let _permit = semaphore.acquire().await.unwrap();
+                            if let Err(e) = handle_connection(state, ip_bo, db, stream, stream_addr, rate_limiter, handshake_timeout).await {
                                 error!("Connection error for {}: {}", stream_addr, e);
                             }
                         });
