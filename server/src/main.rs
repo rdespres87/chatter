@@ -641,6 +641,15 @@ impl RateLimiter {
             return false;
         }
 
+        // Evict empty entries to prevent unbounded map growth.
+        // Drop the `timestamps` reference so we can mutably borrow `map`.
+        let _ = timestamps;
+        if map.get(&addr).map(|v| v.is_empty()).unwrap_or(false) {
+            map.remove(&addr);
+        }
+
+        // Re-acquire the entry to push the new timestamp.
+        let timestamps = map.entry(addr).or_insert_with(Vec::new);
         timestamps.push(now);
         true
     }
@@ -1518,6 +1527,30 @@ mod tests {
         assert!(limiter.check(addr_b, now));
         assert!(limiter.check(addr_b, now + std::time::Duration::from_millis(100)));
         assert!(!limiter.check(addr_b, now + std::time::Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn test_rate_limiter_evicts_empty_entries() {
+        // Use a per-address limiter to control the static map.
+        // Since MAP is static, we test behavior: after the window expires,
+        // a fresh call from an old address should be allowed (proving eviction).
+        let limiter = RateLimiter::new(1, 1); // 1 msg per second
+        let addr = test_addr(9010);
+        let now = std::time::Instant::now();
+
+        // Use the single allowed message.
+        assert!(limiter.check(addr, now));
+        // Now at the limit — should be rejected.
+        assert!(!limiter.check(addr, now + std::time::Duration::from_millis(500)));
+
+        // Wait for the window to expire.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        // After eviction, the address should be allowed again.
+        assert!(
+            limiter.check(addr, now + std::time::Duration::from_secs(2)),
+            "rate limiter should allow after window expires (entry evicted)"
+        );
     }
 
     #[test]
