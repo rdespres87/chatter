@@ -221,11 +221,6 @@ pub async fn reconnect_attempt(
 pub struct EventHandler {
     events_tx: mpsc::UnboundedSender<AppEvent>,
     events_rx: mpsc::UnboundedReceiver<AppEvent>,
-    /// Handle for the initial connection task (prevents it from being dropped).
-    _connect_handle: Option<JoinHandle<()>>,
-    /// Handles for the current reader and heartbeat tasks (for abort on reconnect).
-    _reader_handle: Option<JoinHandle<()>>,
-    _heartbeat_handle: Option<JoinHandle<()>>,
 }
 
 impl EventHandler {
@@ -240,9 +235,6 @@ impl EventHandler {
         let handler = Self {
             events_tx,
             events_rx,
-            _connect_handle: None,
-            _reader_handle: None,
-            _heartbeat_handle: None,
         };
         (handler, ws_sink, initial_read, connect_notify, task_handles)
     }
@@ -270,9 +262,8 @@ impl EventHandler {
         events_tx: mpsc::UnboundedSender<AppEvent>,
         task_handles: TaskHandles,
     ) {
-        let (connect_h, reader_h, heartbeat_h) =
+        let (_connect_h, reader_h, heartbeat_h) =
             spawn_connection(url, sink, initial_read, events_tx, notify);
-        self._connect_handle = Some(connect_h);
         // Store reader/heartbeat handles in the shared Arc.
         let mut handles = task_handles.lock().unwrap();
         *handles = Some((reader_h, heartbeat_h));
