@@ -77,6 +77,10 @@ impl Peer {
 
 type PeerMap = Arc<std::sync::RwLock<HashMap<SocketAddr, Peer>>>;
 
+/// Persistent backoff state keyed by IP address (survives connection drops).
+/// Maps `IpAddr` → `(failure_count, next_attempt_instant)`.
+type IpBackoffMap = Arc<std::sync::RwLock<HashMap<std::net::IpAddr, (u32, Option<Instant>)>>>;
+
 type ServerResult = std::result::Result<(), anyhow::Error>;
 
 async fn acquire_account_task_permit() -> AccountTaskPermit {
@@ -110,13 +114,14 @@ where
 async fn process_data(
     message: chatter_protocol::ClientMessage,
     peer_map: PeerMap,
+    ip_backoff: IpBackoffMap,
     addr: SocketAddr,
     account_db: Account,
 ) {
     match message {
         chatter_protocol::ClientMessage::CreateAccount { login, passwd } => {
             info!("Create account request for login: {}", login);
-            match account_backoff_remaining(&peer_map, addr) {
+            match account_backoff_remaining(&peer_map, &ip_backoff, addr) {
                 Ok(Some(_)) => {
                     send_server_message(
                         &peer_map,
@@ -144,7 +149,7 @@ async fn process_data(
 
             match create_result {
                 Ok(true) => {
-                    clear_account_failures(&peer_map, addr).ok();
+                    clear_account_failures(&peer_map, &ip_backoff, addr).ok();
                     send_server_message(
                         &peer_map,
                         addr,
@@ -157,7 +162,7 @@ async fn process_data(
                         "Account creation rejected because '{}' already exists",
                         login
                     );
-                    record_account_failure(&peer_map, addr).ok();
+                    record_account_failure(&peer_map, &ip_backoff, addr).ok();
                     send_server_message(
                         &peer_map,
                         addr,
@@ -169,7 +174,7 @@ async fn process_data(
                 }
                 Err(e) => {
                     warn!("Failed to create account '{}': {}", login, e);
-                    record_account_failure(&peer_map, addr).ok();
+                    record_account_failure(&peer_map, &ip_backoff, addr).ok();
                     send_server_message(
                         &peer_map,
                         addr,
@@ -187,7 +192,7 @@ async fn process_data(
             // (predating the reserved-name check) contains such an account.
             if login == RESERVED_ANONYMOUS_LOGIN {
                 warn!("Login rejected for reserved username '{}'", login);
-                record_account_failure(&peer_map, addr).ok();
+                record_account_failure(&peer_map, &ip_backoff, addr).ok();
                 send_server_message(
                     &peer_map,
                     addr,
@@ -198,7 +203,7 @@ async fn process_data(
                 .ok();
                 return;
             }
-            match account_backoff_remaining(&peer_map, addr) {
+            match account_backoff_remaining(&peer_map, &ip_backoff, addr) {
                 Ok(Some(_)) => {
                     if let Ok(Some((old_login, rooms))) = clear_peer_authentication(&peer_map, addr)
                     {
@@ -240,7 +245,7 @@ async fn process_data(
                             return;
                         }
                     }
-                    clear_account_failures(&peer_map, addr).ok();
+                    clear_account_failures(&peer_map, &ip_backoff, addr).ok();
                     send_server_message(
                         &peer_map,
                         addr,
@@ -261,7 +266,7 @@ async fn process_data(
                 }
                 Ok(false) => {
                     warn!("Login failed for '{}'", login);
-                    record_account_failure(&peer_map, addr).ok();
+                    record_account_failure(&peer_map, &ip_backoff, addr).ok();
                     if let Ok(Some((old_login, rooms))) = clear_peer_authentication(&peer_map, addr)
                     {
                         announce_room_departures(&peer_map, &addr, &old_login, rooms);
@@ -277,7 +282,7 @@ async fn process_data(
                 }
                 Err(e) => {
                     error!("Error verifying credentials for '{}': {}", login, e);
-                    record_account_failure(&peer_map, addr).ok();
+                    record_account_failure(&peer_map, &ip_backoff, addr).ok();
                     if let Ok(Some((old_login, rooms))) = clear_peer_authentication(&peer_map, addr)
                     {
                         announce_room_departures(&peer_map, &addr, &old_login, rooms);
@@ -649,10 +654,25 @@ fn account_backoff_duration(failures: u32) -> Duration {
     Duration::from_millis((ACCOUNT_BACKOFF_BASE_MS * multiplier).min(ACCOUNT_BACKOFF_MAX_MS))
 }
 
+/// Check if there is remaining backoff for the given address, using IP-based
+/// persistent state (survives connection drops).
 fn account_backoff_remaining(
     peer_map: &PeerMap,
+    ip_backoff: &IpBackoffMap,
     addr: SocketAddr,
 ) -> std::result::Result<Option<Duration>, chatter_protocol::ServerMessage> {
+    // Check IP-based backoff first (persistent across connections).
+    let ip = addr.ip();
+    {
+        let map = ip_backoff.read().map_err(|_| lock_peer_error())?;
+        if let Some((_, next_attempt)) = map.get(&ip)
+            && let Some(duration) =
+                next_attempt.and_then(|na| na.checked_duration_since(Instant::now()))
+        {
+            return Ok(Some(duration));
+        }
+    }
+    // Fall back to per-peer backoff (same connection).
     let peers = peer_map.read().map_err(|_| lock_peer_error())?;
     let peer = peers.get(&addr).ok_or_else(session_not_found_error)?;
     Ok(peer
@@ -660,26 +680,48 @@ fn account_backoff_remaining(
         .and_then(|next_attempt| next_attempt.checked_duration_since(Instant::now())))
 }
 
+/// Record a login/account creation failure, updating both IP-based and peer-level state.
 fn record_account_failure(
     peer_map: &PeerMap,
+    ip_backoff: &IpBackoffMap,
     addr: SocketAddr,
 ) -> std::result::Result<(), chatter_protocol::ServerMessage> {
+    let ip = addr.ip();
+    // Update IP-based persistent state.
+    {
+        let mut map = ip_backoff.write().map_err(|_| lock_peer_error())?;
+        let entry = map.entry(ip).or_insert((0, None));
+        entry.0 = entry.0.saturating_add(1);
+        entry.1 = Some(Instant::now() + account_backoff_duration(entry.0));
+    }
+    // Also update per-peer state (for same-connection tracking).
     let mut peers = peer_map.write().map_err(|_| lock_peer_error())?;
-    let peer = peers.get_mut(&addr).ok_or_else(session_not_found_error)?;
-    peer.login_failures = peer.login_failures.saturating_add(1);
-    peer.next_account_attempt =
-        Some(Instant::now() + account_backoff_duration(peer.login_failures));
+    if let Some(peer) = peers.get_mut(&addr) {
+        peer.login_failures = peer.login_failures.saturating_add(1);
+        peer.next_account_attempt =
+            Some(Instant::now() + account_backoff_duration(peer.login_failures));
+    }
     Ok(())
 }
 
+/// Clear login/account creation failures for the given address.
 fn clear_account_failures(
     peer_map: &PeerMap,
+    ip_backoff: &IpBackoffMap,
     addr: SocketAddr,
 ) -> std::result::Result<(), chatter_protocol::ServerMessage> {
+    let ip = addr.ip();
+    // Clear IP-based persistent state.
+    {
+        let mut map = ip_backoff.write().map_err(|_| lock_peer_error())?;
+        map.remove(&ip);
+    }
+    // Also clear per-peer state.
     let mut peers = peer_map.write().map_err(|_| lock_peer_error())?;
-    let peer = peers.get_mut(&addr).ok_or_else(session_not_found_error)?;
-    peer.login_failures = 0;
-    peer.next_account_attempt = None;
+    if let Some(peer) = peers.get_mut(&addr) {
+        peer.login_failures = 0;
+        peer.next_account_attempt = None;
+    }
     Ok(())
 }
 
@@ -805,6 +847,7 @@ fn peer_is_in_room(
 
 async fn handle_connection(
     peer_map: PeerMap,
+    ip_backoff: IpBackoffMap,
     account_db: Account,
     raw_stream: TcpStream,
     addr: SocketAddr,
@@ -832,6 +875,7 @@ async fn handle_connection(
 
     let broadcast_incoming = incoming.try_for_each(|msg| {
         let peer_map = peer_map.clone();
+        let ip_backoff = ip_backoff.clone();
         let account_db = account_db.clone();
         let rate_limiter = rate_limiter.clone();
         async move {
@@ -852,7 +896,14 @@ async fn handle_connection(
                     let message = chatter_protocol::parse_client_message(Message::Text(text));
                     match message {
                         Ok(data) => {
-                            process_data(data, peer_map.clone(), addr, account_db.clone()).await;
+                            process_data(
+                                data,
+                                peer_map.clone(),
+                                ip_backoff.clone(),
+                                addr,
+                                account_db.clone(),
+                            )
+                            .await;
                         }
                         Err(e) => warn!("Error parsing message from {}: {}", addr, e),
                     }
@@ -990,6 +1041,9 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Persistent backoff state keyed by IP (survives connection drops).
+    let ip_backoff: IpBackoffMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+
     loop {
         tokio::select! {
             result = listener.accept() => {
@@ -997,9 +1051,10 @@ async fn main() -> anyhow::Result<()> {
                     Ok((stream, stream_addr)) => {
                         let state = state.clone();
                         let db = account_db.clone();
+                        let ip_bo = ip_backoff.clone();
                         let rate_limiter = RateLimiter::new(RATE_LIMIT, RATE_WINDOW_SECS);
                         tasks.spawn(async move {
-                            if let Err(e) = handle_connection(state, db, stream, stream_addr, rate_limiter).await {
+                            if let Err(e) = handle_connection(state, ip_bo, db, stream, stream_addr, rate_limiter).await {
                                 error!("Connection error for {}: {}", stream_addr, e);
                             }
                         });
@@ -1041,6 +1096,10 @@ mod tests {
             }
         }
         Arc::new(map)
+    }
+
+    fn make_ip_backoff() -> IpBackoffMap {
+        Arc::new(std::sync::RwLock::new(HashMap::new()))
     }
 
     fn test_addr(port: u16) -> SocketAddr {
@@ -1124,12 +1183,14 @@ mod tests {
             vec![],
         )]);
 
+        let ip_backoff = make_ip_backoff();
         process_data(
             chatter_protocol::ClientMessage::CreateAccount {
                 login: RESERVED_ANONYMOUS_LOGIN.to_string(),
                 passwd: "password123".to_string(),
             },
             peer_map.clone(),
+            ip_backoff.clone(),
             addr,
             account_db,
         )
@@ -1171,12 +1232,14 @@ mod tests {
             vec![],
         )]);
 
+        let ip_backoff = make_ip_backoff();
         process_data(
             chatter_protocol::ClientMessage::Login {
                 login: RESERVED_ANONYMOUS_LOGIN.to_string(),
                 passwd: "password123".to_string(),
             },
             peer_map.clone(),
+            ip_backoff.clone(),
             addr,
             account_db,
         )
@@ -1222,12 +1285,14 @@ mod tests {
         let (tx, mut rx) = futures_channel::mpsc::unbounded();
         let peer_map = make_peer_map(vec![(addr, tx, "anonymous".to_string(), vec![])]);
 
+        let ip_backoff = make_ip_backoff();
         process_data(
             chatter_protocol::ClientMessage::CreateAccount {
                 login: "alice".to_string(),
                 passwd: "password123".to_string(),
             },
             peer_map.clone(),
+            ip_backoff.clone(),
             addr,
             account_db.clone(),
         )
@@ -1246,12 +1311,14 @@ mod tests {
             "Creating an account must not authenticate the peer"
         );
 
+        let ip_backoff = make_ip_backoff();
         process_data(
             chatter_protocol::ClientMessage::CreateAccount {
                 login: "alice".to_string(),
                 passwd: "different-password".to_string(),
             },
             peer_map.clone(),
+            ip_backoff.clone(),
             addr,
             account_db,
         )
@@ -1297,12 +1364,14 @@ mod tests {
             ),
         ]);
 
+        let ip_backoff = make_ip_backoff();
         process_data(
             chatter_protocol::ClientMessage::Login {
                 login: "new-login".to_string(),
                 passwd: "password123".to_string(),
             },
             peer_map.clone(),
+            ip_backoff.clone(),
             addr,
             account_db,
         )
@@ -1356,12 +1425,14 @@ mod tests {
             ),
         ]);
 
+        let ip_backoff = make_ip_backoff();
         process_data(
             chatter_protocol::ClientMessage::Login {
                 login: "alice".to_string(),
                 passwd: "wrong-password".to_string(),
             },
             peer_map.clone(),
+            ip_backoff.clone(),
             addr,
             account_db,
         )
@@ -1554,5 +1625,126 @@ mod tests {
         // After logout, login should be empty and is_authenticated false.
         assert_eq!(peer.login, "");
         assert!(!peer.is_authenticated);
+    }
+
+    // ---------------------------------------------------------------------------
+    // IP-based backoff persistence tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_ip_backoff_persists_across_connections() {
+        let peer_map: PeerMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let ip_backoff: IpBackoffMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+
+        // Create a peer on port 1000 and record a failure.
+        let addr1 = test_addr(1000);
+        let (tx, _rx) = futures_channel::mpsc::unbounded();
+        peer_map
+            .write()
+            .unwrap()
+            .insert(addr1, Peer::new(tx, "anon".to_string(), HashSet::new()));
+
+        record_account_failure(&peer_map, &ip_backoff, addr1).unwrap();
+
+        // The IP-based backoff should be active.
+        let remaining = account_backoff_remaining(&peer_map, &ip_backoff, addr1).unwrap();
+        assert!(
+            remaining.is_some(),
+            "backoff should be active on original connection"
+        );
+
+        // Simulate a new connection from the same IP (different port).
+        let addr2 = test_addr(1001);
+        let (tx2, _rx2) = futures_channel::mpsc::unbounded();
+        peer_map
+            .write()
+            .unwrap()
+            .insert(addr2, Peer::new(tx2, "anon".to_string(), HashSet::new()));
+
+        // The new connection should ALSO be blocked by the IP-based backoff.
+        let remaining2 = account_backoff_remaining(&peer_map, &ip_backoff, addr2).unwrap();
+        assert!(
+            remaining2.is_some(),
+            "IP-based backoff should persist across connections from the same IP"
+        );
+    }
+
+    #[test]
+    fn test_ip_backoff_cleared_on_success() {
+        let peer_map: PeerMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let ip_backoff: IpBackoffMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+
+        let addr = test_addr(2000);
+        let (tx, _rx) = futures_channel::mpsc::unbounded();
+        peer_map
+            .write()
+            .unwrap()
+            .insert(addr, Peer::new(tx, "anon".to_string(), HashSet::new()));
+
+        // Record failures.
+        record_account_failure(&peer_map, &ip_backoff, addr).unwrap();
+        record_account_failure(&peer_map, &ip_backoff, addr).unwrap();
+
+        // Backoff should be active.
+        assert!(
+            account_backoff_remaining(&peer_map, &ip_backoff, addr)
+                .unwrap()
+                .is_some()
+        );
+
+        // Clear on successful login.
+        clear_account_failures(&peer_map, &ip_backoff, addr).unwrap();
+
+        // Backoff should now be cleared.
+        let remaining = account_backoff_remaining(&peer_map, &ip_backoff, addr).unwrap();
+        assert!(
+            remaining.is_none(),
+            "backoff should be cleared after successful login"
+        );
+    }
+
+    #[test]
+    fn test_ip_backoff_independent_per_ip() {
+        let peer_map: PeerMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let ip_backoff: IpBackoffMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+
+        // Create peers on different IPs.
+        let addr1 = SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            3000,
+        );
+        let addr2 = SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+            3000,
+        );
+
+        let (tx1, _rx1) = futures_channel::mpsc::unbounded();
+        peer_map
+            .write()
+            .unwrap()
+            .insert(addr1, Peer::new(tx1, "anon".to_string(), HashSet::new()));
+
+        let (tx2, _rx2) = futures_channel::mpsc::unbounded();
+        peer_map
+            .write()
+            .unwrap()
+            .insert(addr2, Peer::new(tx2, "anon".to_string(), HashSet::new()));
+
+        // Record failure only for IP 127.0.0.1.
+        record_account_failure(&peer_map, &ip_backoff, addr1).unwrap();
+
+        // addr1 (127.0.0.1) should be blocked.
+        assert!(
+            account_backoff_remaining(&peer_map, &ip_backoff, addr1)
+                .unwrap()
+                .is_some()
+        );
+
+        // addr2 (127.0.0.2) should NOT be blocked.
+        assert!(
+            account_backoff_remaining(&peer_map, &ip_backoff, addr2)
+                .unwrap()
+                .is_none()
+        );
     }
 }
