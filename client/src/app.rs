@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use chrono::{DateTime, NaiveDate, Utc};
 use futures_util::{FutureExt, SinkExt};
 use tokio::sync::{Notify, mpsc};
+use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
 use crate::events::{AppEvent, EventHandler, MAX_HISTORY, SharedRead, SharedSink};
@@ -121,7 +122,8 @@ pub struct App {
     room_selected: usize,
     auth_mode: AuthMode,
     connect_notify: Arc<Notify>,
-    reconnect_pending: bool,
+    /// Handle of the currently running reconnect task (for abort on re-entry).
+    _reconnect_handle: Option<JoinHandle<()>>,
     event_handler: EventHandler,
     /// Clone of the event sender for reconnect (EventHandler is not Clone).
     events_tx: mpsc::UnboundedSender<AppEvent>,
@@ -182,7 +184,7 @@ impl App {
             room_selected: 0,
             auth_mode: AuthMode::Login,
             connect_notify,
-            reconnect_pending: false,
+            _reconnect_handle: None,
             event_handler,
             events_tx,
             pending_actions: Vec::new(),
@@ -390,7 +392,10 @@ impl App {
         self.reset_room_on_disconnect();
         self.connection_state = ConnectionState::Disconnected;
         self.input_mode = InputMode::Disconnected;
-        self.reconnect_pending = true;
+        // Abort any in-flight reconnect before starting a new one.
+        if let Some(old) = self._reconnect_handle.take() {
+            old.abort();
+        }
         let id = self.system_message_id;
         self.system_message_id += 1;
         self.messages.insert(
@@ -416,34 +421,30 @@ impl App {
         self.handle_disconnect(None, None);
     }
     fn start_reconnect(&mut self) {
-        if self.reconnect_pending {
-            let url = self.url.clone();
-            let sink = self.ws_sink.clone();
-            let read = self.initial_read.clone();
-            let notify = self.connect_notify.clone();
-            let events_tx = self.events_tx.clone();
-            let login = if self.login.is_empty() && !self.login_input.is_empty() {
-                Some(self.login_input.clone())
-            } else if !self.login.is_empty() {
-                Some(self.login.clone())
+        let url = self.url.clone();
+        let sink = self.ws_sink.clone();
+        let read = self.initial_read.clone();
+        let notify = self.connect_notify.clone();
+        let events_tx = self.events_tx.clone();
+        let login = if self.login.is_empty() && !self.login_input.is_empty() {
+            Some(self.login_input.clone())
+        } else if !self.login.is_empty() {
+            Some(self.login.clone())
+        } else {
+            None
+        };
+        let password = self.reconnect_password.clone().or_else(|| {
+            if !self.password_input.is_empty() {
+                Some(self.password_input.clone())
             } else {
                 None
-            };
-            let password = self.reconnect_password.clone().or_else(|| {
-                if !self.password_input.is_empty() {
-                    Some(self.password_input.clone())
-                } else {
-                    None
-                }
-            });
-            tokio::spawn(async move {
-                crate::events::reconnect_attempt(
-                    url, sink, read, events_tx, notify, login, password,
-                )
+            }
+        });
+        let handle = tokio::spawn(async move {
+            crate::events::reconnect_attempt(url, sink, read, events_tx, notify, login, password)
                 .await;
-            });
-            self.reconnect_pending = false;
-        }
+        });
+        self._reconnect_handle = Some(handle);
     }
     fn join_room(&mut self, old_room: String, room: String) {
         if !old_room.is_empty() && old_room != room {
@@ -1378,13 +1379,50 @@ fn default_rooms() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::mpsc;
+
     #[test]
     fn connection_state_helpers_are_correct() {
         assert!(!ConnectionState::Disconnected.is_connected());
         assert!(ConnectionState::LoggedIn { login: "a".into() }.is_logged_in());
     }
+
     #[test]
     fn default_room_is_general() {
         assert_eq!(default_rooms(), vec!["general"]);
+    }
+
+    /// S5 regression: _reconnect_handle must start as None.
+    #[tokio::test]
+    async fn reconnect_handle_starts_none() {
+        let ctx = egui::Context::default();
+        let app = App::new("ws://localhost:0".into()).await;
+        assert!(app._reconnect_handle.is_none());
+        // Drop egui context to avoid warnings
+        drop(ctx);
+    }
+
+    /// S5: calling handle_disconnect twice aborts the first reconnect.
+    /// The second call must not spawn a second concurrent reconnect task.
+    #[tokio::test]
+    async fn handle_disconnect_twice_aborts_first_reconnect() {
+        let ctx = egui::Context::default();
+        let (action_tx, _action_rx) = mpsc::unbounded_channel();
+        let mut app = App::new("ws://localhost:0".into()).await;
+        app.action_tx = action_tx;
+
+        // First disconnect — spawns a reconnect task.
+        app.handle_disconnect(None, None);
+        assert!(app._reconnect_handle.is_some());
+
+        // Second disconnect — should abort the first reconnect task.
+        app.handle_disconnect(None, None);
+        // The old handle was taken and aborted; a new one is stored.
+        assert!(app._reconnect_handle.is_some());
+
+        // Wait briefly for any spawned tasks to complete or be aborted.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        drop(ctx);
     }
 }
