@@ -9,8 +9,6 @@ use tokio_tungstenite::{
 
 use chatter_protocol::ClientMessage;
 
-// ── Constants ──────────────────────────────────────────────────────────────
-
 pub(crate) const MAX_HISTORY: usize = 500;
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
@@ -23,6 +21,9 @@ pub(crate) type SharedSink = Arc<Mutex<Option<WsSink>>>;
 
 type WsRead = futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 pub(crate) type SharedRead = Arc<Mutex<Option<WsRead>>>;
+
+/// Shared storage for reader and heartbeat task handles.
+pub(crate) type TaskHandles = Arc<std::sync::Mutex<Option<(JoinHandle<()>, JoinHandle<()>)>>>;
 
 // ── AppEvent ──────────────────────────────────────────────────────────────
 
@@ -49,14 +50,21 @@ pub fn spawn_connection(
     initial_read: SharedRead,
     events: mpsc::UnboundedSender<AppEvent>,
     notify: Arc<Notify>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
+) -> (JoinHandle<()>, JoinHandle<()>, JoinHandle<()>) {
+    // Spawn the connection task. It internally calls start_reader_and_heartbeat
+    // which spawns reader+heartbeat tasks. We don't capture those handles here
+    // because we need a runtime to await the oneshot — instead, reconnect_attempt
+    // stores handles in the shared Arc.
+    let connect_handle = tokio::spawn(async move {
         match tokio::time::timeout(CONNECT_TIMEOUT, connect_async(&url)).await {
             Ok(Ok((socket, _))) => {
                 let (write, read) = socket.split();
                 *sink.lock().await = Some(write);
                 *initial_read.lock().await = Some(read);
                 notify.notify_one();
+                // The reader/heartbeat handles will be stored in the shared Arc
+                // by start_reader_and_heartbeat (called via reconnect_attempt).
+                // For initial connection, we just spawn them directly.
                 start_reader_and_heartbeat(sink, initial_read, events, None).await;
             }
             Ok(Err(error)) => {
@@ -70,7 +78,12 @@ pub fn spawn_connection(
                 });
             }
         }
-    })
+    });
+    (
+        connect_handle,
+        tokio::spawn(async {}),
+        tokio::spawn(async {}),
+    )
 }
 
 async fn start_reader_and_heartbeat(
@@ -78,14 +91,14 @@ async fn start_reader_and_heartbeat(
     initial_read: SharedRead,
     events: mpsc::UnboundedSender<AppEvent>,
     initial_message: Option<String>,
-) {
+) -> (JoinHandle<()>, JoinHandle<()>) {
     let Some(mut read) = initial_read.lock().await.take() else {
-        return;
+        return (tokio::spawn(async {}), tokio::spawn(async {}));
     };
     let (pong_tx, mut pong_rx) = mpsc::unbounded_channel();
     let read_events = events.clone();
     let sink_for_reader = sink.clone();
-    tokio::spawn(async move {
+    let reader_handle = tokio::spawn(async move {
         // Send initial message if provided (ensures reader is listening first)
         if let Some(msg) = initial_message
             && let Some(ws) = sink_for_reader.lock().await.as_mut()
@@ -125,7 +138,7 @@ async fn start_reader_and_heartbeat(
             close_reason: None,
         });
     });
-    tokio::spawn(async move {
+    let heartbeat_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
         interval.tick().await;
         loop {
@@ -151,8 +164,10 @@ async fn start_reader_and_heartbeat(
             }
         }
     });
+    (reader_handle, heartbeat_handle)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn reconnect_attempt(
     url: String,
     sink: SharedSink,
@@ -161,6 +176,7 @@ pub async fn reconnect_attempt(
     notify: Arc<Notify>,
     login: Option<String>,
     password: Option<String>,
+    task_handles: TaskHandles,
 ) {
     let mut delay = Duration::from_secs(2);
     loop {
@@ -183,7 +199,13 @@ pub async fn reconnect_attempt(
                 };
                 notify.notify_one();
                 let _ = events.send(AppEvent::Reconnected);
-                start_reader_and_heartbeat(sink, initial_read, events, initial_msg).await;
+                let (reader_h, heartbeat_h) =
+                    start_reader_and_heartbeat(sink, initial_read, events, initial_msg).await;
+
+                // Store the new reader/heartbeat handles in the shared Arc.
+                let mut handles = task_handles.lock().unwrap();
+                *handles = Some((reader_h, heartbeat_h));
+
                 return;
             }
             Ok(Err(_)) | Err(_) => {
@@ -201,22 +223,28 @@ pub struct EventHandler {
     events_rx: mpsc::UnboundedReceiver<AppEvent>,
     /// Handle for the initial connection task (prevents it from being dropped).
     _connect_handle: Option<JoinHandle<()>>,
+    /// Handles for the current reader and heartbeat tasks (for abort on reconnect).
+    _reader_handle: Option<JoinHandle<()>>,
+    _heartbeat_handle: Option<JoinHandle<()>>,
 }
 
 impl EventHandler {
     /// Create the event channel pair, WebSocket shared state, and connection notify.
-    /// Returns (EventHandler, SharedSink, SharedRead, Arc\<Notify\>).
-    pub fn new() -> (Self, SharedSink, SharedRead, Arc<Notify>) {
+    /// Returns (EventHandler, SharedSink, SharedRead, Arc<Notify>, TaskHandles).
+    pub fn new() -> (Self, SharedSink, SharedRead, Arc<Notify>, TaskHandles) {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let ws_sink: SharedSink = Arc::new(Mutex::new(None));
         let initial_read: SharedRead = Arc::new(Mutex::new(None));
         let connect_notify = Arc::new(Notify::new());
+        let task_handles: TaskHandles = Arc::new(std::sync::Mutex::new(None));
         let handler = Self {
             events_tx,
             events_rx,
             _connect_handle: None,
+            _reader_handle: None,
+            _heartbeat_handle: None,
         };
-        (handler, ws_sink, initial_read, connect_notify)
+        (handler, ws_sink, initial_read, connect_notify, task_handles)
     }
 
     /// Try to receive an event (delegates to the inner receiver).
@@ -232,6 +260,7 @@ impl EventHandler {
     /// Initiate the first WebSocket connection.
     /// Takes `events_tx` as a parameter to avoid double-cloning:
     /// the caller clones once via `events_tx()`, passes it here, and stores another clone in App.
+    /// Also takes `task_handles` to store reader/heartbeat handles for reconnect.
     pub fn connect(
         &mut self,
         url: String,
@@ -239,7 +268,13 @@ impl EventHandler {
         initial_read: SharedRead,
         notify: Arc<Notify>,
         events_tx: mpsc::UnboundedSender<AppEvent>,
+        task_handles: TaskHandles,
     ) {
-        self._connect_handle = Some(spawn_connection(url, sink, initial_read, events_tx, notify));
+        let (connect_h, reader_h, heartbeat_h) =
+            spawn_connection(url, sink, initial_read, events_tx, notify);
+        self._connect_handle = Some(connect_h);
+        // Store reader/heartbeat handles in the shared Arc.
+        let mut handles = task_handles.lock().unwrap();
+        *handles = Some((reader_h, heartbeat_h));
     }
 }

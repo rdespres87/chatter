@@ -124,6 +124,8 @@ pub struct App {
     connect_notify: Arc<Notify>,
     /// Handle of the currently running reconnect task (for abort on re-entry).
     _reconnect_handle: Option<JoinHandle<()>>,
+    /// Shared storage for reader and heartbeat task handles (for abort on reconnect).
+    _task_handles: crate::events::TaskHandles,
     event_handler: EventHandler,
     /// Clone of the event sender for reconnect (EventHandler is not Clone).
     events_tx: mpsc::UnboundedSender<AppEvent>,
@@ -152,7 +154,8 @@ pub struct App {
 
 impl App {
     pub async fn new(url: String) -> Self {
-        let (mut event_handler, ws_sink, initial_read, connect_notify) = EventHandler::new();
+        let (mut event_handler, ws_sink, initial_read, connect_notify, task_handles) =
+            EventHandler::new();
         let (action_tx, action_rx) = mpsc::unbounded_channel();
         let events_tx = event_handler.events_tx(); // clone stored in App for reconnect
         event_handler.connect(
@@ -161,6 +164,7 @@ impl App {
             initial_read.clone(),
             connect_notify.clone(),
             events_tx.clone(), // clone for connect, keep original for App struct
+            task_handles.clone(),
         );
         Self {
             url,
@@ -185,6 +189,7 @@ impl App {
             auth_mode: AuthMode::Login,
             connect_notify,
             _reconnect_handle: None,
+            _task_handles: Arc::new(std::sync::Mutex::new(None)),
             event_handler,
             events_tx,
             pending_actions: Vec::new(),
@@ -426,6 +431,18 @@ impl App {
         let read = self.initial_read.clone();
         let notify = self.connect_notify.clone();
         let events_tx = self.events_tx.clone();
+        // Clone task_handles Arc for the reconnect task.
+        let task_handles = self._task_handles.clone();
+
+        // Abort old reader/heartbeat tasks.
+        {
+            let handles = self._task_handles.lock().unwrap();
+            if let Some((r, h)) = handles.as_ref() {
+                r.abort();
+                h.abort();
+            }
+        }
+
         let login = if self.login.is_empty() && !self.login_input.is_empty() {
             Some(self.login_input.clone())
         } else if !self.login.is_empty() {
@@ -440,9 +457,20 @@ impl App {
                 None
             }
         });
+
+        // Spawn the reconnect task.
         let handle = tokio::spawn(async move {
-            crate::events::reconnect_attempt(url, sink, read, events_tx, notify, login, password)
-                .await;
+            crate::events::reconnect_attempt(
+                url,
+                sink,
+                read,
+                events_tx,
+                notify,
+                login,
+                password,
+                task_handles,
+            )
+            .await;
         });
         self._reconnect_handle = Some(handle);
     }
