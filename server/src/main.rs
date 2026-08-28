@@ -382,8 +382,18 @@ async fn process_data(
             })
             .await;
 
-            if let Err(e) = &msg_id {
-                warn!("Failed to persist message: {}", e);
+            if let Err(ref e) = msg_id {
+                error!("Failed to persist message: {}", e);
+                // Notify the sender that their message was not stored.
+                send_server_message(
+                    &peer_map,
+                    addr,
+                    chatter_protocol::ServerMessage::Error {
+                        message: "Message persistence failed. Try again.".to_string(),
+                        code: "PERSIST_FAILED".to_string(),
+                    },
+                )
+                .ok();
             } else {
                 broadcast_to_room(&peer_map, &addr, &login, &room, &message, msg_id.unwrap()).ok();
             }
@@ -1961,5 +1971,25 @@ mod tests {
 
         // Buffer is now empty — next should be None.
         assert!(rx.next().await.is_none());
+    }
+
+    /// verify that ServerMessage::Error serializes/deserializes correctly.
+    /// This ensures the PERSIST_FAILED notification reaches the client.
+    #[tokio::test]
+    async fn test_error_message_serialization() {
+        let error_msg = chatter_protocol::ServerMessage::Error {
+            message: "Message persistence failed. Try again.".to_string(),
+            code: "PERSIST_FAILED".to_string(),
+        };
+        let serialized = chatter_protocol::serialize_server_message(&error_msg).unwrap();
+        let deserialized: chatter_protocol::ServerMessage =
+            serde_json::from_str(&serialized).unwrap();
+        match deserialized {
+            chatter_protocol::ServerMessage::Error { message, code } => {
+                assert_eq!(message, "Message persistence failed. Try again.");
+                assert_eq!(code, "PERSIST_FAILED");
+            }
+            other => panic!("Expected Error, got {:?}", other),
+        }
     }
 }
