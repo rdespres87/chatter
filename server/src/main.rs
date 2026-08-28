@@ -11,7 +11,7 @@ use std::{
 
 use clap::Parser;
 
-use futures_channel::mpsc::UnboundedSender;
+use futures_channel::mpsc::Sender;
 use futures_util::{StreamExt, future, pin_mut, stream::TryStreamExt};
 
 use anyhow::Context;
@@ -24,7 +24,7 @@ use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 use crate::account::{Account, RESERVED_ANONYMOUS_LOGIN};
 pub mod account;
 
-type Tx = UnboundedSender<Message>;
+type Tx = Sender<Message>;
 
 const TRANSPORT_SECURITY_NOTICE: &str = "SECURITY: this server accepts plain ws:// connections. Deploy it only behind a TLS-terminating reverse proxy (wss:// to clients), otherwise credentials cross the network in cleartext.";
 
@@ -458,9 +458,11 @@ pub(crate) fn send_server_message(
         peers.get(&addr).map(|peer| peer.tx.clone())
     };
 
-    if let Some(tx) = tx {
-        tx.unbounded_send(Message::Text(json.into()))
-            .context("Failed to send message to peer")?;
+    if let Some(mut tx) = tx {
+        // Bounded channel: drop message on full to avoid blocking other peers.
+        if tx.try_send(Message::Text(json.into())).is_err() {
+            warn!("Send queue full for {}, dropping message", addr);
+        }
     }
     Ok(())
 }
@@ -535,8 +537,11 @@ pub(crate) fn broadcast_system_message(
             .collect()
     };
 
-    for tx in recipients {
-        let _ = tx.unbounded_send(Message::Text(json.clone().into()));
+    for mut tx in recipients {
+        // Bounded channel: drop message on full to avoid blocking other peers.
+        if tx.try_send(Message::Text(json.clone().into())).is_err() {
+            warn!("Send queue full, dropping broadcast message");
+        }
     }
     Ok(())
 }
@@ -578,8 +583,11 @@ pub(crate) fn broadcast_to_room(
             .collect()
     };
 
-    for tx in recipients {
-        let _ = tx.unbounded_send(Message::Text(json.clone().into()));
+    for mut tx in recipients {
+        // Bounded channel: drop message on full to avoid blocking other peers.
+        if tx.try_send(Message::Text(json.clone().into())).is_err() {
+            warn!("Send queue full, dropping broadcast message");
+        }
     }
     Ok(())
 }
@@ -856,6 +864,12 @@ fn peer_is_in_room(
     Ok(peer.rooms.contains(room))
 }
 
+/// Configuration for a new WebSocket connection.
+struct ConnectionConfig {
+    handshake_timeout: Duration,
+    send_buffer_size: usize,
+}
+
 async fn handle_connection(
     peer_map: PeerMap,
     ip_backoff: IpBackoffMap,
@@ -863,14 +877,14 @@ async fn handle_connection(
     raw_stream: TcpStream,
     addr: SocketAddr,
     rate_limiter: RateLimiter,
-    handshake_timeout: Duration,
+    config: ConnectionConfig,
 ) -> ServerResult {
     info!("Incoming TCP connection from: {}", addr);
 
     let mut ws_config = WebSocketConfig::default();
     ws_config.max_message_size = Some(chatter_protocol::MAX_PAYLOAD_LEN);
     let ws_stream = tokio::time::timeout(
-        handshake_timeout,
+        config.handshake_timeout,
         tokio_tungstenite::accept_async_with_config(raw_stream, Some(ws_config)),
     )
     .await
@@ -878,7 +892,7 @@ async fn handle_connection(
     .with_context(|| format!("WebSocket handshake failed for {}", addr))?;
     info!("WebSocket connection established: {}", addr);
 
-    let (tx, rx) = futures_channel::mpsc::unbounded();
+    let (tx, rx) = futures_channel::mpsc::channel(config.send_buffer_size);
     peer_map
         .write()
         .map_err(|e| anyhow::anyhow!("RwLock poisoned: {}", e))?
@@ -989,6 +1003,10 @@ struct Cli {
     /// WebSocket handshake timeout in seconds.
     #[arg(long, default_value_t = 10)]
     handshake_timeout_secs: u64,
+
+    /// Per-peer send queue buffer size (number of messages).
+    #[arg(long, default_value_t = 64)]
+    send_buffer_size: usize,
 }
 
 #[tokio::main]
@@ -1082,9 +1100,13 @@ async fn main() -> anyhow::Result<()> {
                         let ip_bo = ip_backoff.clone();
                         let rate_limiter = RateLimiter::new(RATE_LIMIT, RATE_WINDOW_SECS);
                         let semaphore = connection_semaphore.clone();
+                        let config = ConnectionConfig {
+                            handshake_timeout,
+                            send_buffer_size: cli.send_buffer_size,
+                        };
                         tasks.spawn(async move {
                             let _permit = semaphore.acquire().await.unwrap();
-                            if let Err(e) = handle_connection(state, ip_bo, db, stream, stream_addr, rate_limiter, handshake_timeout).await {
+                            if let Err(e) = handle_connection(state, ip_bo, db, stream, stream_addr, rate_limiter, config).await {
                                 error!("Connection error for {}: {}", stream_addr, e);
                             }
                         });
@@ -1162,7 +1184,7 @@ mod tests {
     }
 
     async fn next_server_message(
-        rx: &mut futures_channel::mpsc::UnboundedReceiver<Message>,
+        rx: &mut futures_channel::mpsc::Receiver<Message>,
     ) -> chatter_protocol::ServerMessage {
         let msg = rx.next().await.expect("expected websocket message");
         serde_json::from_str(msg.to_text().unwrap()).unwrap()
@@ -1177,7 +1199,7 @@ mod tests {
     #[test]
     fn test_anonymous_has_no_authenticated_login() {
         let addr = test_addr(8090);
-        let (tx, _rx) = futures_channel::mpsc::unbounded();
+        let (tx, _rx) = futures_channel::mpsc::channel(64);
         let peer_map = make_peer_map(vec![(addr, tx, "anonymous".to_string(), vec![])]);
 
         assert_eq!(
@@ -1195,7 +1217,7 @@ mod tests {
         // Regression test for S1: after logout, login is cleared to "".
         // authenticated_login must reject this (not treat it as authenticated).
         let addr = test_addr(8090);
-        let (tx, _rx) = futures_channel::mpsc::unbounded();
+        let (tx, _rx) = futures_channel::mpsc::channel(64);
 
         // Simulate post-logout state: login cleared to ""
         let peer_map = make_peer_map(vec![(addr, tx, "".to_string(), vec![])]);
@@ -1213,7 +1235,7 @@ mod tests {
     #[test]
     fn test_authenticated_peer_exposes_login() {
         let addr = test_addr(8091);
-        let (tx, _rx) = futures_channel::mpsc::unbounded();
+        let (tx, _rx) = futures_channel::mpsc::channel(64);
         let peer_map = make_peer_map(vec![(addr, tx, "alice".to_string(), vec![])]);
 
         assert_eq!(
@@ -1227,7 +1249,7 @@ mod tests {
     async fn test_create_account_rejects_reserved_anonymous_username() {
         let account_db = Account::new(":memory:".to_string()).unwrap();
         let addr = test_addr(8092);
-        let (tx, mut rx) = futures_channel::mpsc::unbounded();
+        let (tx, mut rx) = futures_channel::mpsc::channel(64);
         let peer_map = make_peer_map(vec![(
             addr,
             tx,
@@ -1276,7 +1298,7 @@ mod tests {
         }
 
         let addr = test_addr(8093);
-        let (tx, mut rx) = futures_channel::mpsc::unbounded();
+        let (tx, mut rx) = futures_channel::mpsc::channel(64);
         let peer_map = make_peer_map(vec![(
             addr,
             tx,
@@ -1334,7 +1356,7 @@ mod tests {
     async fn test_create_account_does_not_authenticate_and_rejects_duplicate() {
         let account_db = Account::new(":memory:".to_string()).unwrap();
         let addr = test_addr(8084);
-        let (tx, mut rx) = futures_channel::mpsc::unbounded();
+        let (tx, mut rx) = futures_channel::mpsc::channel(64);
         let peer_map = make_peer_map(vec![(addr, tx, "anonymous".to_string(), vec![])]);
 
         let ip_backoff = make_ip_backoff();
@@ -1399,8 +1421,8 @@ mod tests {
 
         let addr = test_addr(8085);
         let other_addr = test_addr(8086);
-        let (tx, mut rx) = futures_channel::mpsc::unbounded();
-        let (other_tx, mut other_rx) = futures_channel::mpsc::unbounded();
+        let (tx, mut rx) = futures_channel::mpsc::channel(64);
+        let (other_tx, mut other_rx) = futures_channel::mpsc::channel(64);
         let peer_map = make_peer_map(vec![
             (
                 addr,
@@ -1465,8 +1487,8 @@ mod tests {
 
         let addr = test_addr(8087);
         let other_addr = test_addr(8088);
-        let (tx, mut rx) = futures_channel::mpsc::unbounded();
-        let (other_tx, mut other_rx) = futures_channel::mpsc::unbounded();
+        let (tx, mut rx) = futures_channel::mpsc::channel(64);
+        let (other_tx, mut other_rx) = futures_channel::mpsc::channel(64);
         let peer_map = make_peer_map(vec![
             (addr, tx, "alice".to_string(), vec!["general".to_string()]),
             (
@@ -1599,7 +1621,7 @@ mod tests {
     #[test]
     fn test_join_peer_room_double_join_returns_error() {
         let addr = test_addr(9005);
-        let (tx, _rx) = futures_channel::mpsc::unbounded();
+        let (tx, _rx) = futures_channel::mpsc::channel(64);
         let peer_map = make_peer_map(vec![(
             addr,
             tx,
@@ -1622,7 +1644,7 @@ mod tests {
     #[test]
     fn test_join_peer_room_allows_different_room() {
         let addr = test_addr(9006);
-        let (tx, _rx) = futures_channel::mpsc::unbounded();
+        let (tx, _rx) = futures_channel::mpsc::channel(64);
         let peer_map = make_peer_map(vec![(
             addr,
             tx,
@@ -1643,7 +1665,7 @@ mod tests {
     #[test]
     fn test_peer_logout_clears_auth_and_rooms() {
         let _addr = test_addr(8092);
-        let (tx, _rx) = futures_channel::mpsc::unbounded();
+        let (tx, _rx) = futures_channel::mpsc::channel(64);
         let mut peer = Peer::new(
             tx,
             "alice".to_string(),
@@ -1666,7 +1688,7 @@ mod tests {
     #[test]
     fn test_peer_logout_idempotent() {
         let _addr = test_addr(8093);
-        let (tx, _rx) = futures_channel::mpsc::unbounded();
+        let (tx, _rx) = futures_channel::mpsc::channel(64);
         let mut peer = Peer::new(
             tx,
             "alice".to_string(),
@@ -1689,7 +1711,7 @@ mod tests {
     #[test]
     fn test_logout_sets_anonymous_login() {
         let _addr = test_addr(8094);
-        let (tx, _rx) = futures_channel::mpsc::unbounded();
+        let (tx, _rx) = futures_channel::mpsc::channel(64);
         let mut peer = Peer::new(
             tx.clone(),
             "alice".to_string(),
@@ -1714,7 +1736,7 @@ mod tests {
 
         // Create a peer on port 1000 and record a failure.
         let addr1 = test_addr(1000);
-        let (tx, _rx) = futures_channel::mpsc::unbounded();
+        let (tx, _rx) = futures_channel::mpsc::channel(64);
         peer_map
             .write()
             .unwrap()
@@ -1731,7 +1753,7 @@ mod tests {
 
         // Simulate a new connection from the same IP (different port).
         let addr2 = test_addr(1001);
-        let (tx2, _rx2) = futures_channel::mpsc::unbounded();
+        let (tx2, _rx2) = futures_channel::mpsc::channel(64);
         peer_map
             .write()
             .unwrap()
@@ -1751,7 +1773,7 @@ mod tests {
         let ip_backoff: IpBackoffMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
 
         let addr = test_addr(2000);
-        let (tx, _rx) = futures_channel::mpsc::unbounded();
+        let (tx, _rx) = futures_channel::mpsc::channel(64);
         peer_map
             .write()
             .unwrap()
@@ -1794,13 +1816,13 @@ mod tests {
             3000,
         );
 
-        let (tx1, _rx1) = futures_channel::mpsc::unbounded();
+        let (tx1, _rx1) = futures_channel::mpsc::channel(64);
         peer_map
             .write()
             .unwrap()
             .insert(addr1, Peer::new(tx1, "anon".to_string(), HashSet::new()));
 
-        let (tx2, _rx2) = futures_channel::mpsc::unbounded();
+        let (tx2, _rx2) = futures_channel::mpsc::channel(64);
         peer_map
             .write()
             .unwrap()
@@ -1822,5 +1844,51 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn test_bounded_channel_drops_on_overflow() {
+        // A bounded channel of size 0 should drop messages when full.
+        let (mut tx, mut rx) = futures_channel::mpsc::channel(0);
+
+        // First message goes through (buffer empty).
+        assert!(tx.try_send(Message::Text("a".into())).is_ok());
+
+        // Second message should fail (queue full, no receiver draining).
+        assert!(tx.try_send(Message::Text("b".into())).is_err());
+
+        // First message should be receivable.
+        let msg_a = rx.next().await.unwrap();
+        assert_eq!(msg_a.to_text().unwrap(), "a");
+
+        // Drop sender so channel closes and next().await returns None.
+        drop(tx);
+
+        // After draining, buffer is empty — but "b" was dropped.
+        assert!(rx.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_bounded_channel_normal_operation() {
+        // Verify normal bounded channel behavior: messages within capacity
+        // are delivered correctly.
+        let (mut tx, mut rx) = futures_channel::mpsc::channel(4);
+
+        // Send 3 messages into a 4-slot buffer.
+        for i in 0..3 {
+            assert!(tx.try_send(Message::Text(format!("msg{i}").into())).is_ok());
+        }
+
+        // All should be receivable.
+        for i in 0..3 {
+            let msg = rx.next().await.unwrap();
+            assert_eq!(msg.to_text().unwrap(), format!("msg{i}"));
+        }
+
+        // Drop sender so channel closes.
+        drop(tx);
+
+        // Buffer is now empty — next should be None.
+        assert!(rx.next().await.is_none());
     }
 }

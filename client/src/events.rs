@@ -10,6 +10,7 @@ use tokio_tungstenite::{
 use chatter_protocol::ClientMessage;
 
 pub(crate) const MAX_HISTORY: usize = 500;
+pub(crate) const EVENT_BUFFER_SIZE: usize = 256;
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 pub(crate) const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -48,7 +49,7 @@ pub fn spawn_connection(
     url: String,
     sink: SharedSink,
     initial_read: SharedRead,
-    events: mpsc::UnboundedSender<AppEvent>,
+    events: mpsc::Sender<AppEvent>,
     notify: Arc<Notify>,
 ) -> (JoinHandle<()>, JoinHandle<()>, JoinHandle<()>) {
     // Spawn the connection task. It internally calls start_reader_and_heartbeat
@@ -68,14 +69,18 @@ pub fn spawn_connection(
                 start_reader_and_heartbeat(sink, initial_read, events, None).await;
             }
             Ok(Err(error)) => {
-                let _ = events.send(AppEvent::ConnectionError {
-                    reason: error.to_string(),
-                });
+                let _ = events
+                    .send(AppEvent::ConnectionError {
+                        reason: error.to_string(),
+                    })
+                    .await;
             }
             Err(_) => {
-                let _ = events.send(AppEvent::ConnectionError {
-                    reason: "connection timed out".into(),
-                });
+                let _ = events
+                    .send(AppEvent::ConnectionError {
+                        reason: "connection timed out".into(),
+                    })
+                    .await;
             }
         }
     });
@@ -89,7 +94,7 @@ pub fn spawn_connection(
 async fn start_reader_and_heartbeat(
     sink: SharedSink,
     initial_read: SharedRead,
-    events: mpsc::UnboundedSender<AppEvent>,
+    events: mpsc::Sender<AppEvent>,
     initial_message: Option<String>,
 ) -> (JoinHandle<()>, JoinHandle<()>) {
     let Some(mut read) = initial_read.lock().await.take() else {
@@ -108,9 +113,11 @@ async fn start_reader_and_heartbeat(
         while let Some(result) = read.next().await {
             match result {
                 Ok(Message::Text(data)) => {
-                    let _ = read_events.send(AppEvent::ReceivedMsg {
-                        data: Message::Text(data),
-                    });
+                    let _ = read_events
+                        .send(AppEvent::ReceivedMsg {
+                            data: Message::Text(data),
+                        })
+                        .await;
                 }
                 Ok(Message::Pong(_)) => {
                     let _ = pong_tx.send(());
@@ -118,25 +125,31 @@ async fn start_reader_and_heartbeat(
                 Ok(Message::Close(frame)) => {
                     let close_code = frame.as_ref().map(|f| f.code.into());
                     let close_reason = frame.map(|f| f.reason.to_string());
-                    let _ = read_events.send(AppEvent::Disconnected {
-                        close_code,
-                        close_reason,
-                    });
+                    let _ = read_events
+                        .send(AppEvent::Disconnected {
+                            close_code,
+                            close_reason,
+                        })
+                        .await;
                     return;
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    let _ = read_events.send(AppEvent::ConnectionError {
-                        reason: error.to_string(),
-                    });
+                    let _ = read_events
+                        .send(AppEvent::ConnectionError {
+                            reason: error.to_string(),
+                        })
+                        .await;
                     return;
                 }
             }
         }
-        let _ = read_events.send(AppEvent::Disconnected {
-            close_code: None,
-            close_reason: None,
-        });
+        let _ = read_events
+            .send(AppEvent::Disconnected {
+                close_code: None,
+                close_reason: None,
+            })
+            .await;
     });
     let heartbeat_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
@@ -148,18 +161,22 @@ async fn start_reader_and_heartbeat(
                 None => return,
             };
             if let Err(error) = ping_result {
-                let _ = events.send(AppEvent::ConnectionError {
-                    reason: format!("heartbeat ping failed: {error}"),
-                });
+                let _ = events
+                    .send(AppEvent::ConnectionError {
+                        reason: format!("heartbeat ping failed: {error}"),
+                    })
+                    .await;
                 return;
             }
             if tokio::time::timeout(HEARTBEAT_TIMEOUT, pong_rx.recv())
                 .await
                 .is_err()
             {
-                let _ = events.send(AppEvent::ConnectionError {
-                    reason: "heartbeat pong timed out".into(),
-                });
+                let _ = events
+                    .send(AppEvent::ConnectionError {
+                        reason: "heartbeat pong timed out".into(),
+                    })
+                    .await;
                 return;
             }
         }
@@ -172,7 +189,7 @@ pub async fn reconnect_attempt(
     url: String,
     sink: SharedSink,
     initial_read: SharedRead,
-    events: mpsc::UnboundedSender<AppEvent>,
+    events: mpsc::Sender<AppEvent>,
     notify: Arc<Notify>,
     login: Option<String>,
     password: Option<String>,
@@ -198,7 +215,7 @@ pub async fn reconnect_attempt(
                     None
                 };
                 notify.notify_one();
-                let _ = events.send(AppEvent::Reconnected);
+                let _ = events.send(AppEvent::Reconnected).await;
                 let (reader_h, heartbeat_h) =
                     start_reader_and_heartbeat(sink, initial_read, events, initial_msg).await;
 
@@ -219,15 +236,15 @@ pub async fn reconnect_attempt(
 // ── EventHandler ──────────────────────────────────────────────────────────
 
 pub struct EventHandler {
-    events_tx: mpsc::UnboundedSender<AppEvent>,
-    events_rx: mpsc::UnboundedReceiver<AppEvent>,
+    events_tx: mpsc::Sender<AppEvent>,
+    events_rx: mpsc::Receiver<AppEvent>,
 }
 
 impl EventHandler {
     /// Create the event channel pair, WebSocket shared state, and connection notify.
     /// Returns (EventHandler, SharedSink, SharedRead, Arc<Notify>, TaskHandles).
     pub fn new() -> (Self, SharedSink, SharedRead, Arc<Notify>, TaskHandles) {
-        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let (events_tx, events_rx) = mpsc::channel(EVENT_BUFFER_SIZE);
         let ws_sink: SharedSink = Arc::new(Mutex::new(None));
         let initial_read: SharedRead = Arc::new(Mutex::new(None));
         let connect_notify = Arc::new(Notify::new());
@@ -245,7 +262,7 @@ impl EventHandler {
     }
 
     /// Clone the event sender (for use in reconnect).
-    pub fn events_tx(&self) -> mpsc::UnboundedSender<AppEvent> {
+    pub fn events_tx(&self) -> mpsc::Sender<AppEvent> {
         self.events_tx.clone()
     }
 
@@ -259,7 +276,7 @@ impl EventHandler {
         sink: SharedSink,
         initial_read: SharedRead,
         notify: Arc<Notify>,
-        events_tx: mpsc::UnboundedSender<AppEvent>,
+        events_tx: mpsc::Sender<AppEvent>,
         task_handles: TaskHandles,
     ) {
         let (_connect_h, reader_h, heartbeat_h) =
@@ -267,5 +284,75 @@ impl EventHandler {
         // Store reader/heartbeat handles in the shared Arc.
         let mut handles = task_handles.lock().unwrap();
         *handles = Some((reader_h, heartbeat_h));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Bounded event channel drops messages when full.
+    #[tokio::test]
+    async fn test_bounded_event_channel_drops_on_overflow() {
+        let (tx, mut rx) = mpsc::channel::<AppEvent>(2);
+
+        // First two messages fit.
+        assert!(
+            tx.try_send(AppEvent::ConnectionError {
+                reason: "test".into()
+            })
+            .is_ok()
+        );
+        assert!(
+            tx.try_send(AppEvent::ConnectionError {
+                reason: "test2".into()
+            })
+            .is_ok()
+        );
+
+        // Third message should fail (buffer full).
+        assert!(tx.try_send(AppEvent::Reconnected).is_err());
+
+        // First two messages are receivable.
+        let msg1 = rx.recv().await.unwrap();
+        assert!(matches!(msg1, AppEvent::ConnectionError { .. }));
+        let msg2 = rx.recv().await.unwrap();
+        assert!(matches!(msg2, AppEvent::ConnectionError { .. }));
+
+        // Drop sender so channel closes and recv().await returns None.
+        drop(tx);
+
+        // After draining, channel is empty — "Reconnected" was dropped.
+        assert!(rx.recv().await.is_none());
+    }
+
+    /// Bounded channel delivers all messages within capacity.
+    #[tokio::test]
+    async fn test_bounded_event_channel_normal_operation() {
+        let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
+
+        // Send 5 messages within capacity.
+        for i in 0..5 {
+            assert!(
+                tx.try_send(AppEvent::ConnectionError {
+                    reason: format!("reason{i}")
+                })
+                .is_ok()
+            );
+        }
+
+        // All should be receivable.
+        for i in 0..5 {
+            let msg = rx.recv().await.unwrap();
+            assert!(
+                matches!(msg, AppEvent::ConnectionError { reason } if reason == format!("reason{i}"))
+            );
+        }
+
+        // Drop sender so channel closes.
+        drop(tx);
+
+        // Channel empty now.
+        assert!(rx.recv().await.is_none());
     }
 }

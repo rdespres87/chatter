@@ -128,7 +128,7 @@ pub struct App {
     _task_handles: crate::events::TaskHandles,
     event_handler: EventHandler,
     /// Clone of the event sender for reconnect (EventHandler is not Clone).
-    events_tx: mpsc::UnboundedSender<AppEvent>,
+    events_tx: mpsc::Sender<AppEvent>,
     pending_actions: Vec<PendingAction>,
     action_tx: mpsc::UnboundedSender<ActionResult>,
     action_rx: mpsc::UnboundedReceiver<ActionResult>,
