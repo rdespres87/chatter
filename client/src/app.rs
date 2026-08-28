@@ -369,6 +369,9 @@ impl App {
             }
             ServerMessage::LogoutOk => {
                 self.login.clear();
+                self.reconnect_password.take();
+                self.password_input.clear();
+                self.login_input.clear();
                 self.connection_state = ConnectionState::Connected;
                 self.input_mode = InputMode::Splash;
                 self.auth_error = None;
