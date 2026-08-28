@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    io,
     net::SocketAddr,
     sync::{
         Arc,
@@ -1089,8 +1090,30 @@ async fn main() -> anyhow::Result<()> {
                         });
                     }
                     Err(e) => {
-                        error!("Failed to accept connection: {}", e);
-                        break;
+                        let kind = e.kind();
+                        // Transient errors: resource exhaustion or benign aborts.
+                        // Retry after a short sleep to let the system recover.
+                        let is_transient = matches!(
+                            kind,
+                            io::ErrorKind::WouldBlock
+                                | io::ErrorKind::ConnectionAborted
+                                | io::ErrorKind::Interrupted
+                                | io::ErrorKind::TimedOut
+                        );
+
+                        if is_transient {
+                            warn!(
+                                "Transient accept error ({:?}), retrying in 100ms: {}",
+                                kind, e
+                            );
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        } else {
+                            error!(
+                                "Fatal accept error ({:?}), shutting down: {}",
+                                kind, e
+                            );
+                            break;
+                        }
                     }
                 }
             }
