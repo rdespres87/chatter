@@ -888,19 +888,25 @@ impl App {
                     ConnectionState::Connecting => egui::Color32::from_rgb(200, 180, 0),
                     ConnectionState::Disconnected => egui::Color32::from_rgb(200, 60, 60),
                 };
-                let status_text = match &self.connection_state {
-                    ConnectionState::Connected => "Connected",
-                    ConnectionState::LoggedIn { login } => {
-                        Box::leak(format!("Connected as {}", login).into_boxed_str())
+                let rt = |text: &str| egui::RichText::new(text).size(12.0).color(status_color);
+                match &self.connection_state {
+                    ConnectionState::Connected => {
+                        ui.label(rt("Connected"));
                     }
-                    ConnectionState::Connecting => "Connecting...",
-                    ConnectionState::Disconnected => "Disconnected",
+                    ConnectionState::LoggedIn { login } => {
+                        ui.label(
+                            egui::RichText::new(format!("Connected as {login}"))
+                                .size(12.0)
+                                .color(status_color),
+                        );
+                    }
+                    ConnectionState::Connecting => {
+                        ui.label(rt("Connecting..."));
+                    }
+                    ConnectionState::Disconnected => {
+                        ui.label(rt("Disconnected"));
+                    }
                 };
-                ui.label(
-                    egui::RichText::new(status_text)
-                        .size(12.0)
-                        .color(status_color),
-                );
             });
         });
     }
