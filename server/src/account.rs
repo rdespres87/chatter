@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use bcrypt::{DEFAULT_COST, hash, verify};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::sync::{Arc, MutexGuard};
 use zeroize::Zeroize;
 
@@ -125,7 +125,7 @@ impl Account {
         let stored_hash: Option<String> = {
             let conn = self.lock_connection();
             let mut stmt = conn.prepare("SELECT passwd FROM account WHERE name = ?1")?;
-            stmt.query_row([name], |row| row.get(0)).ok()
+            stmt.query_row([name], |row| row.get(0)).optional()?
         };
 
         let verified = match stored_hash.as_deref() {
@@ -956,5 +956,43 @@ mod tests {
         // Get rooms
         let rooms = account.get_rooms().unwrap();
         assert!(rooms.contains(&"general".to_string()));
+    }
+
+    /// verify_credentials returns Ok(false) for non-existent users,
+    /// not an Err. This distinguishes "user not found" from real DB errors.
+    #[test]
+    fn test_verify_credentials_nonexistent_returns_ok_false() {
+        let account = test_account();
+        // Non-existent user should return Ok(false), not Err
+        let result = account.verify_credentials("nobody".to_string(), "pass".to_string());
+        assert!(
+            result.is_ok(),
+            "Non-existent user should return Ok, not Err"
+        );
+        assert!(!result.unwrap(), "Non-existent user should verify as false");
+    }
+
+    /// verify_credentials propagates DB errors instead of swallowing them.
+    /// The .optional()? call ensures SQLite errors (not just "no rows") become Err.
+    #[test]
+    fn test_verify_credentials_db_error_propagated() {
+        let account = test_account();
+        // Normal case should still work
+        account
+            .insert_account("alice".to_string(), "pass123".to_string())
+            .unwrap();
+        assert!(
+            account
+                .verify_credentials("alice".to_string(), "pass123".to_string())
+                .unwrap(),
+            "Correct credentials should verify"
+        );
+        // Wrong password should return Ok(false)
+        assert!(
+            !account
+                .verify_credentials("alice".to_string(), "wrong".to_string())
+                .unwrap(),
+            "Wrong password should return Ok(false)"
+        );
     }
 }
