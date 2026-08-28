@@ -202,7 +202,7 @@ impl App {
             has_more_history: false,
             has_scrolled_up: false,
             room_join_pending: false,
-            system_message_id: 1000, // Start above normal message ids
+            system_message_id: 1 << 31, // Start above any reasonable server DB ID (2^31)
             auth_error: None,
         }
     }
