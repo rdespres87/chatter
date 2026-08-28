@@ -31,23 +31,8 @@ fn main() -> eframe::Result<()> {
     let mut url = args.url;
 
     // If --port is provided, override the port in the URL.
-    if let Some(port) = args.port
-        && let Some(pos) = url.find("://")
-    {
-        let scheme_end = pos + 3;
-        if let Some(host_start) = url[scheme_end..].find(':') {
-            let host_part_end = scheme_end + host_start;
-            if let Some(path_start) = url[host_part_end..].find('/') {
-                let path_pos = host_part_end + path_start;
-                url = format!("{}:{}{}", &url[..host_part_end], port, &url[path_pos..]);
-            } else {
-                url = format!("{}:{}", &url[..host_part_end], port);
-            }
-        } else if let Some(pos) = url.find('/') {
-            url = format!("{}:{}{}", &url[..pos], port, &url[pos..]);
-        } else {
-            url = format!("{}:{}", url, port);
-        }
+    if let Some(port) = args.port {
+        url = override_url_port(&url, port);
     }
 
     // Load the app icon from disk (relative to client/ crate root).
@@ -97,5 +82,109 @@ impl eframe::App for AppWrapper {
         if let Ok(mut app) = self.inner.lock() {
             app.ui(ui, frame);
         }
+    }
+}
+
+/// Extract URL port override logic into a testable function.
+fn override_url_port(url: &str, port: u16) -> String {
+    let mut url = url.to_owned();
+    if let Some(scheme_end) = url.find("://").map(|i| i + 3) {
+        // Find the port separator ":" after the scheme.
+        // Handle IPv6: skip past "]".
+        let host_part = &url[scheme_end..];
+        let colon_pos = if let Some(bracket_end) = host_part.find(']') {
+            // IPv6 address — look for ":" after the closing bracket.
+            host_part[bracket_end..].find(':').map(|i| bracket_end + i)
+        } else {
+            // IPv4 or hostname — look for first ":".
+            host_part.find(':')
+        };
+
+        if let Some(colon_pos) = colon_pos {
+            let colon_abs = scheme_end + colon_pos;
+            // Replace from colon to the first "/" (or end of string).
+            let path_start = url[colon_abs..].find('/').map(|i| i + colon_abs);
+            match path_start {
+                Some(end) => {
+                    url = format!("{}:{}{}", &url[..colon_abs], port, &url[end..]);
+                }
+                None => {
+                    url = format!("{}:{}", &url[..colon_abs], port);
+                }
+            }
+        } else {
+            // No port in URL — append ":port" after host.
+            let path_start = url[scheme_end..].find('/').map(|i| i + scheme_end);
+            match path_start {
+                Some(end) => {
+                    url = format!("{}:{}{}", &url[..end], port, &url[end..]);
+                }
+                None => {
+                    url = format!("{}:{}", url, port);
+                }
+            }
+        }
+    }
+    url
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn override_port_replaces_existing_port() {
+        assert_eq!(
+            override_url_port("ws://localhost:8080", 9090),
+            "ws://localhost:9090"
+        );
+    }
+
+    #[test]
+    fn override_port_with_path() {
+        assert_eq!(
+            override_url_port("ws://localhost:8080/chat", 9090),
+            "ws://localhost:9090/chat"
+        );
+    }
+
+    #[test]
+    fn override_port_with_wss() {
+        assert_eq!(
+            override_url_port("wss://example.com:443/app", 8443),
+            "wss://example.com:8443/app"
+        );
+    }
+
+    #[test]
+    fn override_port_without_existing_port() {
+        assert_eq!(
+            override_url_port("ws://localhost/chat", 9090),
+            "ws://localhost:9090/chat"
+        );
+    }
+
+    #[test]
+    fn override_port_no_path_no_existing_port() {
+        assert_eq!(
+            override_url_port("ws://localhost", 9090),
+            "ws://localhost:9090"
+        );
+    }
+
+    #[test]
+    fn override_port_with_ipv6() {
+        assert_eq!(
+            override_url_port("ws://[::1]:8080", 9090),
+            "ws://[::1]:9090"
+        );
+    }
+
+    #[test]
+    fn no_port_override_unchanged() {
+        assert_eq!(
+            override_url_port("ws://localhost:8080", 0),
+            "ws://localhost:0"
+        );
     }
 }
