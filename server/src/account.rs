@@ -206,10 +206,14 @@ impl Account {
         Ok((messages, has_more))
     }
 
-    /// Get the list of rooms that have messages.
+    /// Maximum number of rooms returned by `get_rooms()`.
+    pub const MAX_ROOMS: usize = 100;
+
+    /// Get the list of rooms that have messages, limited to `MAX_ROOMS`.
     pub fn get_rooms(&self) -> Result<Vec<String>> {
         let conn = self.lock_connection();
-        let mut stmt = conn.prepare("SELECT DISTINCT room FROM messages ORDER BY room")?;
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT room FROM messages ORDER BY room LIMIT 100")?;
         let rooms = stmt.query_map([], |row| row.get::<_, String>(0))?;
 
         let mut result = Vec::new();
@@ -834,6 +838,53 @@ mod tests {
             general_count, 1,
             "Default room with messages should appear only once"
         );
+    }
+
+    #[test]
+    fn test_get_rooms_limited_to_max() {
+        let account = test_account();
+
+        // Insert messages in more rooms than MAX_ROOMS.
+        for i in 0..(Account::MAX_ROOMS + 50) {
+            account
+                .insert_message(
+                    format!("room-{:04}", i),
+                    "alice".to_string(),
+                    "msg".to_string(),
+                )
+                .unwrap();
+        }
+
+        let rooms = account.get_rooms().unwrap();
+        // The 3 default rooms are always included.
+        // The SQL LIMIT applies to the non-default rooms, so total <= MAX_ROOMS + 3.
+        // With MAX_ROOMS=100 and 150 message rooms, we get at most 100 + 3 = 103.
+        assert!(
+            rooms.len() <= Account::MAX_ROOMS + 3,
+            "get_rooms() should be bounded (got {} rooms, expected <= {})",
+            rooms.len(),
+            Account::MAX_ROOMS + 3
+        );
+    }
+
+    #[test]
+    fn test_get_rooms_under_limit_returns_all() {
+        let account = test_account();
+
+        // Insert fewer rooms than MAX_ROOMS.
+        for i in 0..10 {
+            account
+                .insert_message(
+                    format!("room-{:04}", i),
+                    "alice".to_string(),
+                    "msg".to_string(),
+                )
+                .unwrap();
+        }
+
+        let rooms = account.get_rooms().unwrap();
+        // All 10 message rooms + 3 defaults should be present.
+        assert_eq!(rooms.len(), 13);
     }
 
     // --- Full auth flow ---

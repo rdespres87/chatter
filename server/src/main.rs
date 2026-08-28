@@ -803,6 +803,9 @@ fn announce_room_departures(
     }
 }
 
+/// Maximum number of rooms a single peer can join.
+const MAX_ROOMS_PER_USER: usize = 20;
+
 fn join_peer_room(
     peer_map: &PeerMap,
     addr: SocketAddr,
@@ -815,6 +818,16 @@ fn join_peer_room(
         return Err(client_error_with_code(
             &format!("You are already in room '{}'", room),
             "ALREADY_IN_ROOM",
+        ));
+    }
+
+    if peer.rooms.len() >= MAX_ROOMS_PER_USER {
+        return Err(client_error_with_code(
+            &format!(
+                "You have reached the maximum of {} rooms",
+                MAX_ROOMS_PER_USER
+            ),
+            "MAX_ROOMS_EXCEEDED",
         ));
     }
 
@@ -1660,6 +1673,69 @@ mod tests {
         let peer = peers.get(&addr).unwrap();
         assert!(peer.rooms.contains("general"));
         assert!(peer.rooms.contains("rust"));
+    }
+
+    #[test]
+    fn test_join_peer_room_enforces_max_rooms_per_user() {
+        let addr = test_addr(9007);
+        let (tx, _rx) = futures_channel::mpsc::channel(64);
+
+        // Pre-fill the peer with MAX_ROOMS_PER_USER - 1 rooms so only one more is allowed.
+        let initial_rooms: Vec<String> = (0..(MAX_ROOMS_PER_USER - 1))
+            .map(|i| format!("room-{}", i))
+            .collect();
+
+        let peer_map = make_peer_map(vec![(addr, tx, "alice".to_string(), initial_rooms.clone())]);
+
+        // Should succeed — still under the cap.
+        let extra_room = format!("room-extra");
+        assert!(
+            join_peer_room(&peer_map, addr, extra_room.clone()).is_ok(),
+            "Should be able to join when under the cap"
+        );
+
+        // Now the peer is at exactly MAX_ROOMS_PER_USER.
+        {
+            let peers = peer_map.read().unwrap();
+            let peer = peers.get(&addr).unwrap();
+            assert_eq!(peer.rooms.len(), MAX_ROOMS_PER_USER);
+        }
+
+        // One more join should be rejected.
+        let result = join_peer_room(&peer_map, addr, "room-full".into());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            chatter_protocol::ServerMessage::Error { code, message } => {
+                assert_eq!(code, "MAX_ROOMS_EXCEEDED");
+                assert!(message.contains(&format!("{}", MAX_ROOMS_PER_USER)));
+            }
+            other => panic!("Expected Error variant, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_join_peer_room_allows_after_leave() {
+        let addr = test_addr(9008);
+        let (tx, _rx) = futures_channel::mpsc::channel(64);
+
+        // Fill the peer to MAX_ROOMS_PER_USER - 1.
+        let initial_rooms: Vec<String> = (0..(MAX_ROOMS_PER_USER - 1))
+            .map(|i| format!("room-{}", i))
+            .collect();
+
+        let peer_map = make_peer_map(vec![(addr, tx, "alice".to_string(), initial_rooms.clone())]);
+
+        // Join one more to reach the cap.
+        assert!(join_peer_room(&peer_map, addr, "room-extra".into()).is_ok());
+
+        // Now at cap — leave a room.
+        leave_peer_room(&peer_map, addr, "room-0").unwrap();
+
+        // Should be able to join a new room again.
+        assert!(
+            join_peer_room(&peer_map, addr, "room-new".into()).is_ok(),
+            "Should allow join after leaving a room"
+        );
     }
 
     #[test]
