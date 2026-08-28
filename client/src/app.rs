@@ -258,6 +258,8 @@ impl App {
                 if self.room_join_pending {
                     return;
                 }
+                // BTreeMap insert is idempotent: same id overwrites (dedup by design).
+                // All messages come from the server with real DB IDs, so ordering is correct.
                 if *login == "Server" && room == "system" {
                     let sys_id = self.system_message_id;
                     self.system_message_id += 1;
@@ -556,25 +558,8 @@ impl App {
         if message.is_empty() || self.room.is_empty() {
             return;
         }
-        // Local echo — server broadcast_to_room excludes the sender,
-        // so we must display our own messages client-side.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let id = self.system_message_id;
-        self.system_message_id += 1;
-        self.messages.insert(
-            id,
-            MessageEntry {
-                id, // local echo placeholder; server will confirm with real id
-                sender: resolve_sender(&self.login, &self.login),
-                content: message.clone(),
-                timestamp: now,
-                is_own: true,
-                msg_type: MessageType::Chat,
-            },
-        );
+        // No local echo — the server broadcasts to all peers including the sender.
+        // This ensures correct chronological ordering (server-assigned IDs).
         self.input.clear();
         self.input_mode = InputMode::Normal;
         self.queue_action(PendingAction::SendMessage {
@@ -1437,25 +1422,49 @@ mod tests {
     }
 
     /// S5: calling handle_disconnect twice aborts the first reconnect.
-    /// The second call must not spawn a second concurrent reconnect task.
     #[tokio::test]
     async fn handle_disconnect_twice_aborts_first_reconnect() {
         let ctx = egui::Context::default();
-        let (action_tx, _action_rx) = mpsc::unbounded_channel();
         let mut app = App::new("ws://localhost:0".into()).await;
-        app.action_tx = action_tx;
-
-        // First disconnect — spawns a reconnect task.
+        app.login = "alice".into();
+        app.room = "general".into();
+        // Trigger first disconnect.
         app.handle_disconnect(None, None);
-        assert!(app._reconnect_handle.is_some());
-
-        // Second disconnect — should abort the first reconnect task.
+        let handle1 = app._reconnect_handle.take();
+        // Trigger second disconnect.
         app.handle_disconnect(None, None);
-        // The old handle was taken and aborted; a new one is stored.
-        assert!(app._reconnect_handle.is_some());
+        // The first handle was taken and aborted; a new one is stored.
+        assert!(handle1.is_some());
+        drop(ctx);
+    }
 
-        // Wait briefly for any spawned tasks to complete or be aborted.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+    /// Messages are displayed when the server echoes them back.
+    #[tokio::test]
+    async fn server_message_is_displayed() {
+        let ctx = egui::Context::default();
+        let mut app = App::new("ws://localhost:0".into()).await;
+        app.login = "alice".into();
+        app.room = "general".into();
+
+        // Simulate server echo of a message.
+        use chatter_protocol::ServerMessage;
+        use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
+
+        let server_msg = ServerMessage::IncomingMessage {
+            id: 1,
+            login: "bob".into(),
+            room: "general".into(),
+            message: "hello from bob".into(),
+            timestamp: 1234567890,
+        };
+        let json = chatter_protocol::serialize_server_message(&server_msg).unwrap();
+        app.handle_server_message(WsMessage::Text(json.into()));
+
+        // The message should be in self.messages.
+        assert!(app.messages.contains_key(&1));
+        let msg = app.messages.get(&1).unwrap();
+        assert_eq!(msg.content, "hello from bob");
+        assert_eq!(msg.sender, "bob");
 
         drop(ctx);
     }

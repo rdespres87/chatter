@@ -546,10 +546,10 @@ pub(crate) fn broadcast_system_message(
     Ok(())
 }
 
-/// Broadcast a regular chat message to all peers in the same room except the sender.
+/// Broadcast a regular chat message to all peers in the same room, including the sender.
 pub(crate) fn broadcast_to_room(
     peer_map: &PeerMap,
-    sender_addr: &SocketAddr,
+    _sender_addr: &SocketAddr,
     login: &str,
     room: &str,
     message: &str,
@@ -572,14 +572,9 @@ pub(crate) fn broadcast_to_room(
             .read()
             .map_err(|e| anyhow::anyhow!("RwLock poisoned: {}", e))?;
         peers
-            .iter()
-            .filter_map(|(peer_addr, peer)| {
-                if peer_addr != sender_addr && peer.rooms.contains(room) {
-                    Some(peer.tx.clone())
-                } else {
-                    None
-                }
-            })
+            .values()
+            .filter(|peer| peer.rooms.contains(room))
+            .map(|peer| peer.tx.clone())
             .collect()
     };
 
