@@ -122,13 +122,19 @@ pub struct App {
     room_selected: usize,
     auth_mode: AuthMode,
     connect_notify: Arc<Notify>,
-    /// Handle of the currently running reconnect task (for abort on re-entry).
+    /// Handle for the currently running reconnect task (for abort on re-entry).
     _reconnect_handle: Option<JoinHandle<()>>,
     /// Shared storage for reader and heartbeat task handles (for abort on reconnect).
     _task_handles: crate::events::TaskHandles,
     event_handler: EventHandler,
     /// Clone of the event sender for reconnect (EventHandler is not Clone).
     events_tx: mpsc::Sender<AppEvent>,
+    /// Room to rejoin after a successful reconnect (if we were in one).
+    /// None means join the first room from the list on reconnect.
+    current_room: Option<String>,
+    /// Set to true after LoginOk; cleared when RoomList is received.
+    /// Triggers auto-join of current_room (if set) or the first room.
+    _pending_join_after_login: bool,
     pending_actions: Vec<PendingAction>,
     action_tx: mpsc::UnboundedSender<ActionResult>,
     action_rx: mpsc::UnboundedReceiver<ActionResult>,
@@ -192,6 +198,8 @@ impl App {
             _task_handles: Arc::new(std::sync::Mutex::new(None)),
             event_handler,
             events_tx,
+            current_room: None,
+            _pending_join_after_login: false,
             pending_actions: Vec::new(),
             action_tx,
             action_rx,
@@ -221,7 +229,8 @@ impl App {
                 self.system_message_id += 1;
                 self.messages
                     .insert(id, Self::system_message("Login successful.".into()));
-                self.join_room(String::new(), "general".into());
+                // Defer room join until RoomList arrives (first room is the default).
+                self._pending_join_after_login = true;
             }
             ServerMessage::LoginFailed { reason } => {
                 self.connection_state = ConnectionState::Connected;
@@ -283,6 +292,17 @@ impl App {
             ServerMessage::RoomList { rooms } => {
                 self.rooms = rooms;
                 self.room_selected = self.rooms.iter().position(|r| r == &self.room).unwrap_or(0);
+                // Auto-join: saved room on reconnect, or first room on fresh login.
+                if self._pending_join_after_login && !self.rooms.is_empty() {
+                    let room = self
+                        .current_room
+                        .take()
+                        .or_else(|| self.rooms.first().cloned());
+                    if let Some(room) = room {
+                        self.join_room(String::new(), room);
+                    }
+                    self._pending_join_after_login = false;
+                }
             }
             ServerMessage::RoomHistory {
                 room,
@@ -377,6 +397,9 @@ impl App {
                 self.auth_error = None;
                 self.rooms.clear();
                 self.room_selected = 0;
+                // Logout is a fresh start — no saved room to rejoin.
+                self.current_room = None;
+                self._pending_join_after_login = false;
                 let id = self.system_message_id;
                 self.system_message_id += 1;
                 self.messages
@@ -513,11 +536,14 @@ impl App {
             .push(PendingAction::GetHistory { room, cursor });
     }
     fn reset_room_on_disconnect(&mut self) {
-        // If we were in a room, leave it before resetting (matches ratatui reconnect behavior).
+        // If we were in a room, leave it before resetting and remember it for reconnect.
         let prev_room = std::mem::take(&mut self.room);
         if !prev_room.is_empty() {
+            self.current_room = Some(prev_room.clone());
             self.pending_actions
                 .push(PendingAction::LeaveRoom { room: prev_room });
+        } else {
+            self.current_room = None;
         }
         self.room_selected = 0;
     }
@@ -832,6 +858,8 @@ impl App {
                         if was_logged_in && room != &self.room {
                             let old_room = self.room.clone();
                             self.room.clone_from(room);
+                            // User explicitly chose a room — clear the reconnect target.
+                            self.current_room = None;
                             self.join_room(old_room, room.clone());
                         } else {
                             self.room.clone_from(room);
@@ -1469,6 +1497,143 @@ mod tests {
         assert_eq!(msg.content, "hello from bob");
         assert_eq!(msg.sender, "bob");
 
+        drop(ctx);
+    }
+
+    /// current_room starts as None on fresh app creation.
+    #[tokio::test]
+    async fn current_room_is_none_on_fresh_start() {
+        let ctx = egui::Context::default();
+        let app = App::new("ws://localhost:0".into()).await;
+        assert!(app.current_room.is_none());
+        drop(ctx);
+    }
+
+    /// reset_room_on_disconnect saves the current room to current_room.
+    #[tokio::test]
+    async fn reset_room_on_disconnect_saves_current_room() {
+        let ctx = egui::Context::default();
+        let mut app = App::new("ws://localhost:0".into()).await;
+        app.login = "alice".into();
+        app.room = "general".into();
+        app.reset_room_on_disconnect();
+        assert_eq!(app.current_room, Some("general".into()));
+        assert!(app.room.is_empty());
+        drop(ctx);
+    }
+
+    /// reset_room_on_disconnect sets current_room to None when room is empty.
+    #[tokio::test]
+    async fn reset_room_on_disconnect_clears_empty_room() {
+        let ctx = egui::Context::default();
+        let mut app = App::new("ws://localhost:0".into()).await;
+        app.room.clear(); // Start with empty room.
+        app.reset_room_on_disconnect();
+        assert!(app.current_room.is_none());
+        drop(ctx);
+    }
+
+    /// LogoutOk clears current_room and _pending_join_after_login.
+    #[tokio::test]
+    async fn logout_ok_clears_reconnect_state() {
+        let ctx = egui::Context::default();
+        let mut app = App::new("ws://localhost:0".into()).await;
+        app.login = "alice".into();
+        app.room = "general".into();
+        app.current_room = Some("general".into());
+        app._pending_join_after_login = true;
+        // Simulate LogoutOk.
+        use chatter_protocol::ServerMessage;
+        use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
+        let json = chatter_protocol::serialize_server_message(&ServerMessage::LogoutOk).unwrap();
+        app.handle_server_message(WsMessage::Text(json.into()));
+        assert!(app.current_room.is_none());
+        assert!(!app._pending_join_after_login);
+        drop(ctx);
+    }
+
+    /// RoomList triggers auto-join of first room when current_room is None.
+    #[tokio::test]
+    async fn room_list_auto_joins_first_room_on_fresh_login() {
+        let ctx = egui::Context::default();
+        let mut app = App::new("ws://localhost:0".into()).await;
+        app.login = "alice".into();
+        app._pending_join_after_login = true;
+        app.current_room = None; // Fresh login — no saved room.
+        // Simulate RoomList arrival.
+        use chatter_protocol::ServerMessage;
+        use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
+        let json = chatter_protocol::serialize_server_message(&ServerMessage::RoomList {
+            rooms: vec!["general".into(), "random".into()],
+        })
+        .unwrap();
+        app.handle_server_message(WsMessage::Text(json.into()));
+        // Should have joined "general" (first room) and cleared flags.
+        assert!(!app._pending_join_after_login);
+        assert!(app.current_room.is_none()); // .take() consumed it.
+        assert_eq!(app.room, "general");
+        drop(ctx);
+    }
+
+    /// RoomList triggers auto-join of saved room on reconnect.
+    #[tokio::test]
+    async fn room_list_auto_joins_saved_room_on_reconnect() {
+        let ctx = egui::Context::default();
+        let mut app = App::new("ws://localhost:0".into()).await;
+        app.login = "alice".into();
+        app._pending_join_after_login = true;
+        app.current_room = Some("dev".into()); // Reconnect — saved room.
+        // Simulate RoomList arrival.
+        use chatter_protocol::ServerMessage;
+        use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
+        let json = chatter_protocol::serialize_server_message(&ServerMessage::RoomList {
+            rooms: vec!["general".into(), "dev".into()],
+        })
+        .unwrap();
+        app.handle_server_message(WsMessage::Text(json.into()));
+        // Should have joined "dev" (saved room) and cleared flags.
+        assert!(!app._pending_join_after_login);
+        assert!(app.current_room.is_none()); // .take() consumed it.
+        assert_eq!(app.room, "dev");
+        drop(ctx);
+    }
+
+    /// RoomList does not auto-join when _pending_join_after_login is false.
+    #[tokio::test]
+    async fn room_list_no_auto_join_when_not_pending() {
+        let ctx = egui::Context::default();
+        let mut app = App::new("ws://localhost:0".into()).await;
+        app.login = "alice".into();
+        app._pending_join_after_login = false; // Not pending.
+        app.current_room = Some("dev".into());
+        use chatter_protocol::ServerMessage;
+        use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
+        let json = chatter_protocol::serialize_server_message(&ServerMessage::RoomList {
+            rooms: vec!["general".into()],
+        })
+        .unwrap();
+        app.handle_server_message(WsMessage::Text(json.into()));
+        // Should NOT have joined anything.
+        assert!(!app._pending_join_after_login); // Still false (flag unchanged).
+        assert_eq!(app.current_room, Some("dev".into())); // Still set.
+        drop(ctx);
+    }
+
+    /// RoomList with empty room list does not auto-join.
+    #[tokio::test]
+    async fn room_list_empty_does_not_auto_join() {
+        let ctx = egui::Context::default();
+        let mut app = App::new("ws://localhost:0".into()).await;
+        app.login = "alice".into();
+        app._pending_join_after_login = true;
+        use chatter_protocol::ServerMessage;
+        use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
+        let json =
+            chatter_protocol::serialize_server_message(&ServerMessage::RoomList { rooms: vec![] })
+                .unwrap();
+        app.handle_server_message(WsMessage::Text(json.into()));
+        // Should NOT have joined anything.
+        assert!(app._pending_join_after_login);
         drop(ctx);
     }
 }
