@@ -4,17 +4,37 @@ WebSocket chat application with an egui desktop client, written in Rust.
 
 ## Table of Contents
 
-- [Project Structure](#project-structure)
-- [Technical Choices](#technical-choices)
-- [Crate Dependencies](#crate-dependencies)
-- [Architecture Overview](#architecture-overview)
-- [Features](#features)
-- [Limitations](#limitations)
-- [Getting Started](#getting-started)
-  - [Prerequisites](#prerequisites)
-  - [Build & Run](#build--run)
+- [chatter](#chatter)
+  - [Table of Contents](#table-of-contents)
+  - [Project Structure](#project-structure)
+  - [Technical Choices](#technical-choices)
+    - [Protocol — JSON over WebSocket](#protocol--json-over-websocket)
+    - [Persistence — SQLite via rusqlite](#persistence--sqlite-via-rusqlite)
+    - [Concurrency — tokio async runtime](#concurrency--tokio-async-runtime)
+    - [Protocol — Message Reference](#protocol--message-reference)
+    - [Protocol — Sequence Diagrams](#protocol--sequence-diagrams)
+    - [Protocol — Constraints](#protocol--constraints)
+  - [Crate Dependencies](#crate-dependencies)
+    - [`protocol` — Shared types between client and server](#protocol--shared-types-between-client-and-server)
+    - [`server` — WebSocket chat server](#server--websocket-chat-server)
+    - [`client` — egui desktop chat client](#client--egui-desktop-chat-client)
+  - [Architecture Overview](#architecture-overview)
+  - [Features](#features)
+    - [Server](#server)
+    - [Client](#client)
+  - [Limitations](#limitations)
+  - [Getting Started](#getting-started)
+    - [Prerequisites](#prerequisites)
+    - [Build \& Run](#build--run)
+      - [Server Configuration](#server-configuration)
+      - [Client Configuration](#client-configuration)
   - [Docker](#docker)
-- [Testing](#testing)
+    - [Quick Start](#quick-start)
+    - [Docker Compose Configuration](#docker-compose-configuration)
+    - [Dockerfile (Multi-stage Build)](#dockerfile-multi-stage-build)
+    - [Running Without Docker Compose](#running-without-docker-compose)
+  - [Testing](#testing)
+  - [License](#license)
 
 ## Project Structure
 
@@ -102,6 +122,129 @@ The server runs on **tokio**, Rust's asynchronous runtime:
 
 The client also runs on tokio for its WebSocket connection management, enabling
 non-blocking I/O during reconnection attempts.
+
+### Protocol — Message Reference
+
+All messages are JSON-serialized WebSocket frames. The `protocol` crate defines
+the two message types as Rust enums with `serde` derive macros.
+
+**Client → Server messages (`ClientMessage`):**
+
+| Variant | Fields | Description |
+| ------- | ------ | ----------- |
+| `CreateAccount` | `login: String`, `passwd: String` | Register a new account |
+| `Login` | `login: String`, `passwd: String` | Authenticate |
+| `JoinRoom` | `room: String` | Join a chat room |
+| `LeaveRoom` | `room: String` | Leave a chat room |
+| `SendMessage` | `room: String`, `message: String` | Send a chat message |
+| `GetHistory` | `room: String`, `cursor: Option<u64>` | Fetch room history (cursor = oldest seen ID) |
+| `Logout` | — | Disconnect gracefully |
+
+**Server → Client messages (`ServerMessage`):**
+
+| Variant | Fields | Description |
+| ------- | ------ | ----------- |
+| `LoginOk` | `login: String` | Authentication successful |
+| `LoginFailed` | `reason: String` | Bad credentials |
+| `AccountCreated` | `login: String` | Registration successful |
+| `AccountCreationFailed` | `reason: String` | Registration rejected |
+| `IncomingMessage` | `id`, `login`, `room`, `message`, `timestamp` | New message in a room |
+| `RoomList` | `rooms: Vec<String>` | Available rooms |
+| `RoomHistory` | `room`, `messages: Vec<HistoryEntry>`, `has_more: bool` | History page |
+| `LogoutOk` | — | Logout confirmed |
+| `Error` | `message: String`, `code: String` | Generic error |
+
+### Protocol — Sequence Diagrams
+
+The following diagrams illustrate the message flow for the main use cases.
+
+**Account creation and login:**
+
+```text
+Client                                    Server
+  |                                         |
+  |  { "CreateAccount": { "login": "alice", ... } }
+  |────────────────────────────────────────>│  bcrypt hash + INSERT
+  |                                         │
+  |  { "AccountCreated": { "login": "alice" } }
+  |<────────────────────────────────────────│
+  |                                         |
+  |  { "Login": { "login": "alice", ... } }
+  |────────────────────────────────────────>│  bcrypt verify + auth
+  |                                         |
+  |  { "LoginOk": { "login": "alice" } }    │
+  |  { "RoomList": { "rooms": ["general", ...] } }
+  |<────────────────────────────────────────│
+```
+
+**Join room, send messages, and history:**
+
+```text
+Client A                              Server          Client B
+  |                                    │                 |
+  |  { "Login": ... }                  │                 |
+  |──────────>                         │                 |
+  |  { "LoginOk": ... }                │                 |
+  |<──────────                         │                 |
+  |                                    │                 |
+  |  { "JoinRoom": { "room": "general" } }               │
+  |──────────>                         │                 |
+  |                                    │  { "IncomingMessage": "alice joined" }
+  |                                    |────────────────>│
+  |                                    │                 |
+  |  { "SendMessage": { "room": "general", "message": "Hello!" } }
+  |──────────>                         │                 |
+  |                                    │  { "IncomingMessage": ... }
+  |                                    |──────────>      │
+  |                                    |<─────────────────│ (echo back)
+  |                                    │                 |
+  |  (scroll up →)                     │                 |
+  |  { "GetHistory": { "room": "general", "cursor": null } }
+  |──────────>                         │                 |
+  |  { "RoomHistory": { messages: [...], has_more: false } }
+  |<──────────                         │                 |
+  |                                    │                 |
+  |  { "GetHistory": { "cursor": 42 } }│                 |
+  |──────────>                         │                 |
+  |  { "RoomHistory": { ..., has_more: true } }          │
+  |<──────────                         │                 |
+  |                                    │                 |
+  |  { "LeaveRoom": { "room": "general" } }              │
+  |──────────>                         │                 |
+  |                                    │  { "IncomingMessage": "alice left" }
+  |                                    |────────────────>│
+```
+
+**Graceful disconnect and auto-reconnect:**
+
+```text
+Client                                    Server
+  |                                    │
+  |  (connection drops / Close frame)  │
+  |<───────────────────────────────────│
+  |                                    │
+  |  (wait 1s, retry)                  │
+  |  { WebSocket connect }             │
+  |──────────────────────────────────->│
+  |  { WebSocket open }                │
+  |<──────────────────────────────────-│
+  |  (resend Login credentials)        │
+  |  { "Login": ... }                  │
+  |──────────>                         │
+  |  { "LoginOk": ... }                │
+  |<──────────                         │
+  |                                    │
+```
+
+### Protocol — Constraints
+
+| Field | Min | Max | Rules |
+| ----- | --- | --- | ----- |
+| Login | 2 bytes | 32 bytes (new) / 64 (legacy) | ASCII alphanumeric + `_`, no reserved prefixes |
+| Password | 4 bytes | 72 bytes | No NUL, bcrypt truncates at 72 |
+| Room name | 1 byte | 32 bytes (new) / 64 (legacy) | ASCII alphanumeric + `_` + `-` |
+| Message | 1 byte | 4096 bytes | No control chars (except `\n`, `\r`) |
+| WebSocket payload | — | 2 MB | Text frames only |
 
 ## Crate Dependencies
 
