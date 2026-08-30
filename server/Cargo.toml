@@ -2,7 +2,7 @@
 name = "server"
 version.workspace = true
 authors.workspace = true
-description.workspace = true
+description = "WebSocket chat server with SQLite persistence, bcrypt auth, and room management"
 documentation.workspace = true
 edition.workspace = true
 

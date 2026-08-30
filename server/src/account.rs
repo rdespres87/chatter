@@ -1,3 +1,9 @@
+//! Persistent account and message storage backed by SQLite.
+//!
+//! This module provides a thread-safe wrapper around a SQLite connection
+//! for user account management (create, authenticate) and chat message
+//! persistence (insert, retrieve with cursor-based pagination).
+
 use anyhow::{Context, Result, bail};
 use bcrypt::{DEFAULT_COST, hash, verify};
 use rusqlite::{Connection, OptionalExtension};
@@ -11,6 +17,10 @@ const DUMMY_BCRYPT_HASH: &str = "$2b$12$C6UzMDM.H6dfI/f/IKcEe.7kcMRTwcbP4fjUu6zI
 pub const RESERVED_ANONYMOUS_LOGIN: &str = "anonymous";
 
 /// Thread-safe wrapper around a SQLite connection.
+///
+/// Manages user account creation/authentication and chat message persistence
+/// (insert, retrieve with cursor-based pagination). Uses `Arc<Mutex<Connection>>`
+/// for thread safety. Passwords are hashed with bcrypt before storage.
 #[derive(Clone)]
 pub struct Account {
     connection: Arc<std::sync::Mutex<Connection>>,

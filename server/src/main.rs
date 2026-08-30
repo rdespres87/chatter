@@ -1,3 +1,15 @@
+//! WebSocket chat server for the chatter_bis project.
+//!
+//! The server manages WebSocket connections, user authentication (bcrypt),
+//! chat rooms with message broadcasting, and SQLite persistence.
+//!
+//! # Architecture
+//!
+//! - **PeerMap**: `Arc<RwLock<HashMap<SocketAddr, Peer>>>` tracks all connected clients.
+//! - **Account**: Thread-safe SQLite wrapper for user accounts and messages.
+//! - **Async runtime**: Tokio handles all I/O with `spawn_blocking` for CPU-bound work (bcrypt, SQLite).
+//! - **Graceful shutdown**: `ctrlc` handler + `JoinSet` for clean task termination.
+
 use std::{
     collections::{HashMap, HashSet},
     io,
@@ -39,6 +51,10 @@ const ACCOUNT_BACKOFF_MAX_MS: u64 = 8_000;
 static ACCOUNT_TASKS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static SYSTEM_MSG_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Semaphore permit for concurrent blocking account tasks.
+///
+/// Prevents more than `MAX_CONCURRENT_ACCOUNT_TASKS` (64) bcrypt hashing
+/// or SQLite operations from running simultaneously.
 struct AccountTaskPermit;
 
 impl Drop for AccountTaskPermit {
@@ -48,17 +64,27 @@ impl Drop for AccountTaskPermit {
 }
 
 /// Peer state: websocket sender, login name, room membership, and auth backoff.
+///
+/// Cloned and shared across async tasks via `Arc`. The mutable fields are
+/// protected by the outer `RwLock<PeerMap>`.
 #[derive(Clone)]
 pub(crate) struct Peer {
+    /// WebSocket send channel for this peer.
     pub(crate) tx: Tx,
+    /// Current login name (empty if not authenticated).
     pub(crate) login: String,
+    /// Rooms this peer has joined.
     pub(crate) rooms: HashSet<String>,
+    /// Number of consecutive login/account failures (for backoff).
     login_failures: u32,
+    /// Earliest time the next account operation is allowed.
     next_account_attempt: Option<Instant>,
+    /// Whether the peer has completed authentication.
     is_authenticated: bool,
 }
 
 impl Peer {
+    /// Create a new peer with the given websocket sender and initial state.
     fn new(tx: Tx, login: String, rooms: HashSet<String>) -> Self {
         Self {
             tx,
@@ -597,6 +623,7 @@ pub(crate) fn broadcast_to_room(
     Ok(())
 }
 
+/// Construct a standard `Error` server message.
 fn client_error(message: &str) -> chatter_protocol::ServerMessage {
     chatter_protocol::ServerMessage::Error {
         message: message.to_string(),
@@ -673,6 +700,7 @@ impl RateLimiter {
 const RATE_LIMIT: usize = 20;
 const RATE_WINDOW_SECS: u64 = 1;
 
+/// Compute exponential backoff duration for account operations.
 fn account_backoff_duration(failures: u32) -> Duration {
     let multiplier = 1u64 << failures.saturating_sub(1).min(5);
     Duration::from_millis((ACCOUNT_BACKOFF_BASE_MS * multiplier).min(ACCOUNT_BACKOFF_MAX_MS))
@@ -790,6 +818,7 @@ fn clear_peer_authentication(
     set_authenticated_peer(peer_map, addr, RESERVED_ANONYMOUS_LOGIN.to_string())
 }
 
+/// Announce room departures for a peer that is being replaced (same login from different IP).
 fn announce_room_departures(
     peer_map: &PeerMap,
     addr: &SocketAddr,
@@ -888,6 +917,7 @@ struct ConnectionConfig {
     send_buffer_size: usize,
 }
 
+/// Handle a single WebSocket connection from a client.
 async fn handle_connection(
     peer_map: PeerMap,
     ip_backoff: IpBackoffMap,
@@ -1027,6 +1057,11 @@ struct Cli {
     send_buffer_size: usize,
 }
 
+/// Entry point for the chat server.
+///
+/// Parses command-line arguments (port), initializes the WebSocket listener,
+/// spawns background tasks for stats logging and database cleanup, then runs
+/// the server event loop until interrupted.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();

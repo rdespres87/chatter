@@ -1,3 +1,9 @@
+//! WebSocket transport and event handling for the chat client.
+//!
+//! This module manages the low-level WebSocket connection (connect, disconnect,
+//! reconnection with exponential backoff), the reader task, heartbeat/ping-pong,
+//! and the event channel that feeds events into the egui application loop.
+
 use futures_util::{SinkExt, StreamExt};
 use std::{sync::Arc, time::Duration};
 use tokio::net::TcpStream;
@@ -9,18 +15,24 @@ use tokio_tungstenite::{
 
 use chatter_protocol::ClientMessage;
 
+/// Maximum number of messages kept in the client message history.
 pub(crate) const MAX_HISTORY: usize = 500;
+/// Event channel buffer size.
 pub(crate) const EVENT_BUFFER_SIZE: usize = 256;
+/// Timeout for initial WebSocket connection attempts.
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Interval between heartbeat ping messages.
 pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+/// Timeout waiting for a pong response to a heartbeat ping.
 pub(crate) const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 
-// ── WebSocket types ───────────────────────────────────────────────────────
-
+/// WebSocket types for connection management.
 type WsSink = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
+/// Shared (`Arc<Mutex>`) reference to the write half of the WebSocket connection.
 pub(crate) type SharedSink = Arc<Mutex<Option<WsSink>>>;
 
 type WsRead = futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
+/// Shared (`Arc<Mutex>`) reference to the read half of the WebSocket connection.
 pub(crate) type SharedRead = Arc<Mutex<Option<WsRead>>>;
 
 /// Shared storage for reader and heartbeat task handles.
@@ -28,23 +40,36 @@ pub(crate) type TaskHandles = Arc<std::sync::Mutex<Option<(JoinHandle<()>, JoinH
 
 // ── AppEvent ──────────────────────────────────────────────────────────────
 
+/// Events emitted by the WebSocket transport layer.
 #[derive(Clone, Debug)]
 pub enum AppEvent {
+    /// A text message was received from the server.
     ReceivedMsg {
+        /// The raw WebSocket message data.
         data: Message,
     },
+    /// The WebSocket connection was closed.
     Disconnected {
+        /// The close code sent by the remote (if any).
         close_code: Option<u16>,
+        /// The close reason sent by the remote (if any).
         close_reason: Option<String>,
     },
+    /// A connection error occurred (network failure, timeout).
     ConnectionError {
+        /// Human-readable description of the error.
         reason: String,
     },
+    /// Successfully reconnected after a disconnection.
     Reconnected,
 }
 
 // ── Async functions (moved from App impl) ─────────────────────────────────
 
+/// Spawn the initial WebSocket connection, reader, and heartbeat tasks.
+///
+/// Returns three JoinHandles: (connect_handle, placeholder_reader, placeholder_heartbeat).
+/// The actual reader/heartbeat handles are stored in the shared `TaskHandles` Arc.
 pub fn spawn_connection(
     url: String,
     sink: SharedSink,
@@ -184,6 +209,10 @@ async fn start_reader_and_heartbeat(
     (reader_handle, heartbeat_handle)
 }
 
+/// Attempt to reconnect with exponential backoff.
+///
+/// On success, spawns new reader and heartbeat tasks, stores their handles,
+/// and sends a `Reconnected` event. On failure, doubles the delay (max 60s).
 #[allow(clippy::too_many_arguments)]
 pub async fn reconnect_attempt(
     url: String,
@@ -235,14 +264,20 @@ pub async fn reconnect_attempt(
 
 // ── EventHandler ──────────────────────────────────────────────────────────
 
+/// Manages the event channel for WebSocket events.
+///
+/// The `EventHandler` owns the event receiver and provides methods to create
+/// the channel pair, receive events, and initiate WebSocket connections.
 pub struct EventHandler {
+    /// Sender for events to the application.
     events_tx: mpsc::Sender<AppEvent>,
+    /// Receiver for events from the WebSocket transport.
     events_rx: mpsc::Receiver<AppEvent>,
 }
 
 impl EventHandler {
     /// Create the event channel pair, WebSocket shared state, and connection notify.
-    /// Returns (EventHandler, SharedSink, SharedRead, Arc<Notify>, TaskHandles).
+    /// Returns (EventHandler, SharedSink, SharedRead, `Arc<Notify>`, TaskHandles).
     pub fn new() -> (Self, SharedSink, SharedRead, Arc<Notify>, TaskHandles) {
         let (events_tx, events_rx) = mpsc::channel(EVENT_BUFFER_SIZE);
         let ws_sink: SharedSink = Arc::new(Mutex::new(None));

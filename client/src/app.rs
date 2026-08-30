@@ -1,3 +1,11 @@
+//! Client application state and UI logic for the chat client.
+//!
+//! This module implements the `egui` application, managing:
+//! - Authentication flow (splash screen, login, register)
+//! - WebSocket connection lifecycle (connect, disconnect, auto-reconnect)
+//! - Chat room management (join, leave, message display)
+//! - Message history with cursor-based pagination
+
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use chrono::{DateTime, NaiveDate, Utc};
@@ -36,26 +44,43 @@ fn sender_color_for(name: &str) -> egui::Color32 {
     egui::Color32::from_rgb((r & 0xFF) as u8, (g & 0xFF) as u8, (b & 0xFF) as u8)
 }
 
+/// Authentication mode for the splash screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthMode {
+    /// Show the login form.
     Login,
+    /// Show the registration form.
     Register,
 }
 
+/// Input mode for the splash/auth screens and chat.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputMode {
+    /// Splash screen: no connection established yet.
     Splash,
+    /// User is entering their login name on the splash screen.
     EnteringLogin,
+    /// User is entering their password on the splash screen.
     EnteringPassword,
+    /// Normal chat mode: input field sends messages.
     Normal,
+    /// Disconnected state: input is disabled until reconnection.
     Disconnected,
 }
 
+/// Current connection state of the client.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionState {
+    /// Attempting to establish a WebSocket connection.
     Connecting,
+    /// WebSocket connection is open and authenticated.
     Connected,
-    LoggedIn { login: String },
+    /// Connection is open and user is authenticated with the given login.
+    LoggedIn {
+        /// Login name of the authenticated user.
+        login: String,
+    },
+    /// WebSocket connection is closed (no active session).
     Disconnected,
 }
 
@@ -69,58 +94,131 @@ impl ConnectionState {
     }
 }
 
+/// Type of a message entry in the chat UI.
 #[derive(Clone, Debug)]
 pub enum MessageType {
+    /// A regular chat message from a user.
     Chat,
+    /// A system notification (e.g. join/leave, connection status).
     System(String),
 }
 
+/// A single chat message displayed in the UI.
 #[derive(Clone, Debug)]
 pub struct MessageEntry {
+    /// Unique message ID (from server or auto-generated for system messages).
     pub id: u64,
+    /// Display name of the sender (resolved via `resolve_sender`).
     pub sender: String,
+    /// The message content.
     pub content: String,
+    /// Unix timestamp of the message.
     pub timestamp: i64,
+    /// Whether this message was sent by the current user.
     pub is_own: bool,
+    /// Type of message (chat vs system notification).
     pub msg_type: MessageType,
 }
 
+/// Pending action queued for sending over WebSocket.
 #[derive(Debug, Clone)]
 enum PendingAction {
-    Login { login: String, password: String },
-    Register { login: String, password: String },
-    SendMessage { room: String, message: String },
-    LeaveRoom { room: String },
-    JoinRoom { room: String },
-    GetHistory { room: String, cursor: Option<u64> },
+    /// Login action.
+    Login {
+        /// Login name.
+        login: String,
+        /// Password.
+        password: String,
+    },
+    /// Register action.
+    Register {
+        /// Login name for the new account.
+        login: String,
+        /// Password.
+        password: String,
+    },
+    /// Send a chat message.
+    SendMessage {
+        /// Target room name.
+        room: String,
+        /// Message content.
+        message: String,
+    },
+    /// Leave a room.
+    LeaveRoom {
+        /// Room name to leave.
+        room: String,
+    },
+    /// Join a room.
+    JoinRoom {
+        /// Room name to join.
+        room: String,
+    },
+    /// Request room history.
+    GetHistory {
+        /// Room name.
+        room: String,
+        /// Cursor (oldest seen message ID).
+        cursor: Option<u64>,
+    },
+    /// Logout action.
     Logout,
 }
 
+/// Result of a pending action sent to the server.
 #[derive(Debug)]
 enum ActionResult {
+    /// Action was sent successfully.
     Sent,
+    /// Room join was successful.
     Joined,
+    /// Action failed with an error message.
     Failed(String),
 }
 
-/// All client state, including the asynchronous WebSocket transport.
+/// Main application state and UI logic for the chat client.
+///
+/// This struct holds all client-side state including:
+/// - WebSocket connection (sink, reader, reconnect handling)
+/// - Authentication state (login, rooms, auth mode)
+/// - Chat messages (BTreeMap by ID for ordering)
+/// - UI state (input, theme, connection state display)
+///
+/// It implements `eframe::App` (via `AppWrapper`) for the egui desktop GUI.
 pub struct App {
+    /// WebSocket server URL (e.g. "ws://localhost:8080").
     url: String,
+    /// Whether the application is running.
     running: bool,
+    /// Main input text (for chat messages or splash screen).
     input: String,
+    /// Current input mode (splash, login, password, normal chat, disconnected).
     input_mode: InputMode,
+    /// All chat messages keyed by ID for ordered display.
     messages: BTreeMap<u64, MessageEntry>,
+    /// Index offset for scroll position in the message list.
     message_offset: usize,
+    /// Shared reference to the WebSocket write channel.
     ws_sink: SharedSink,
+    /// Shared reference to the initial read handle.
     initial_read: SharedRead,
+    /// Current login name of the authenticated user.
     login: String,
+    /// Currently active chat room name.
     room: String,
+    /// Text input for login name on splash screen.
     login_input: String,
+    /// Text input for password on splash screen.
     password_input: String,
+    /// Password to reuse after reconnection (auto-fill on reconnect).
     reconnect_password: Option<String>,
+    /// List of available chat rooms received from the server.
     rooms: Vec<String>,
+    /// Index into the `rooms` list of the currently selected room.
     room_selected: usize,
+    /// Current authentication mode (login vs register).
     auth_mode: AuthMode,
+    /// Notification signal for reconnection state changes.
     connect_notify: Arc<Notify>,
     /// Handle for the currently running reconnect task (for abort on re-entry).
     _reconnect_handle: Option<JoinHandle<()>>,
@@ -135,10 +233,15 @@ pub struct App {
     /// Set to true after LoginOk; cleared when RoomList is received.
     /// Triggers auto-join of current_room (if set) or the first room.
     _pending_join_after_login: bool,
+    /// Queue of actions waiting to be sent over WebSocket.
     pending_actions: Vec<PendingAction>,
+    /// Sender for action results (from the action processor task).
     action_tx: mpsc::UnboundedSender<ActionResult>,
+    /// Receiver for action results.
     action_rx: mpsc::UnboundedReceiver<ActionResult>,
+    /// Current connection state (connecting, connected, logged in, disconnected).
     connection_state: ConnectionState,
+    /// Whether the custom egui theme has been applied.
     theme_configured: bool,
     /// Oldest message id loaded so far (for cursor-based pagination).
     oldest_message_id: Option<u64>,

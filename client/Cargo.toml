@@ -2,7 +2,7 @@
 name = "client"
 version.workspace = true
 authors.workspace = true
-description.workspace = true
+description = "Desktop chat client with egui GUI, WebSocket transport, and auto-reconnect"
 documentation.workspace = true
 edition.workspace = true
 

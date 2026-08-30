@@ -2,7 +2,7 @@
 name = "chatter_protocol"
 version = "0.2.0"
 authors.workspace = true
-description.workspace = true
+description = "Shared message types and serialization for the WebSocket chat protocol"
 documentation.workspace = true
 edition.workspace = true
 

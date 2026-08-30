@@ -1,3 +1,9 @@
+//! Shared protocol types for the WebSocket chat application.
+//!
+//! This crate defines the message types (`ClientMessage`, `ServerMessage`),
+//! validation functions, and serialization helpers used by both the client
+//! and server. It is a dependency of both `server` and `client`.
+
 use std::{borrow::Cow, fmt};
 
 use anyhow::{Result, bail};
@@ -10,42 +16,80 @@ pub const MAX_PAYLOAD_LEN: usize = 2 * 1024 * 1024;
 /// Default number of history entries per page.
 /// Total payload: ~100 × ~4 KB ≈ 420 KB, well within MAX_PAYLOAD_LEN.
 pub const HISTORY_PAGE_SIZE: usize = 100;
+/// Minimum login name length.
 pub const MIN_LOGIN_LEN: usize = 2;
 /// Legacy protocol/display login limit. Existing SQLite rows may contain
 /// names created before the stricter account-creation policy.
 pub const MAX_LOGIN_LEN: usize = 64;
+/// Maximum login name length for new accounts.
 pub const MAX_NEW_LOGIN_LEN: usize = 32;
+/// Minimum password length.
 pub const MIN_PASSWORD_LEN: usize = 4;
 /// bcrypt only uses the first 72 bytes of input.
 pub const MAX_PASSWORD_LEN: usize = 72;
 /// Legacy protocol/display room limit. Existing SQLite rows may contain
 /// rooms created before the stricter room-creation policy.
 pub const MAX_ROOM_LEN: usize = 64;
+/// Maximum room name length for new rooms.
 pub const MAX_NEW_ROOM_LEN: usize = 32;
+/// Maximum chat message length in bytes.
 pub const MAX_CHAT_MESSAGE_LEN: usize = 4096;
+/// Maximum length for error/reason strings.
 pub const MAX_REASON_LEN: usize = 1024;
+/// Maximum number of history entries returned in a single query.
 pub const MAX_HISTORY_ENTRIES: usize = 1000;
 
 const RESERVED_LOGIN_PREFIXES: &[&str] = &["server", "system", "admin", "root", "anonymous"];
 
+/// Client-to-server message types.
+///
+/// These are the messages the client can send to the server over WebSocket.
+/// Each variant carries the fields required for that operation.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub enum ClientMessage {
     /// Create a new account.
-    CreateAccount { login: String, passwd: String },
+    CreateAccount {
+        /// Login name for the new account (2-32 bytes, ASCII alphanumeric + `_`).
+        login: String,
+        /// Password for the account (4-72 bytes).
+        passwd: String,
+    },
     /// Login with credentials.
-    Login { login: String, passwd: String },
+    Login {
+        /// Login name to authenticate (up to 64 bytes, legacy).
+        login: String,
+        /// Password for authentication.
+        passwd: String,
+    },
     /// Join a chat room. The server derives the user identity from the session.
-    JoinRoom { room: String },
+    JoinRoom {
+        /// Name of the room to join (1-32 bytes, ASCII alphanumeric + `_` + `-`).
+        room: String,
+    },
     /// Leave a chat room. The server derives the user identity from the session.
-    LeaveRoom { room: String },
+    LeaveRoom {
+        /// Name of the room to leave.
+        room: String,
+    },
     /// Send a message to a room. The server derives the user identity from the session.
-    SendMessage { room: String, message: String },
+    SendMessage {
+        /// Name of the target room.
+        room: String,
+        /// Message content (1-4096 bytes, no control characters).
+        message: String,
+    },
     /// Request history for a room. `cursor` is the id of the last message
     /// already seen — only messages with a smaller id are returned, enabling
     /// cursor-based pagination.  Omit `cursor` (or pass `None`) to fetch the
     /// most recent chunk.
-    GetHistory { room: String, cursor: Option<u64> },
+    GetHistory {
+        /// Name of the room to query history for.
+        room: String,
+        /// ID of the last message already seen (for cursor-based pagination).
+        /// `None` to fetch the most recent page.
+        cursor: Option<u64>,
+    },
     /// Request to disconnect from the server.
     Logout,
 }
@@ -80,39 +124,71 @@ impl fmt::Debug for ClientMessage {
     }
 }
 
+/// A single historical chat message entry.
+///
+/// Returned by `RoomHistory` server messages and stored in the SQLite database.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryEntry {
+    /// Unique auto-incrementing message ID.
     pub id: u64,
+    /// Login name of the sender.
     pub login: String,
+    /// Unix timestamp (seconds) when the message was created.
     pub timestamp: i64,
+    /// The chat message content.
     pub message: String,
 }
 
+/// Server-to-client message types.
+///
+/// These are the messages the server sends to clients over WebSocket.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub enum ServerMessage {
     /// Login succeeded for the given account.
-    LoginOk { login: String },
+    LoginOk {
+        /// Login name of the authenticated user.
+        login: String,
+    },
     /// Login failed with a user-displayable reason.
-    LoginFailed { reason: String },
+    LoginFailed {
+        /// Human-readable reason for the login failure.
+        reason: String,
+    },
     /// Account creation succeeded for the given login.
-    AccountCreated { login: String },
+    AccountCreated {
+        /// Login name of the newly created account.
+        login: String,
+    },
     /// Account creation failed with a user-displayable reason.
-    AccountCreationFailed { reason: String },
+    AccountCreationFailed {
+        /// Human-readable reason for the account creation failure.
+        reason: String,
+    },
     /// Incoming message from a user in a room.
     IncomingMessage {
+        /// Unique auto-incrementing message ID.
         id: u64,
+        /// Login name of the sender.
         login: String,
+        /// Name of the room this message belongs to.
         room: String,
+        /// The chat message content.
         message: String,
+        /// Unix timestamp (seconds) when the message was created.
         timestamp: i64,
     },
     /// Server sends available rooms list.
-    RoomList { rooms: Vec<String> },
+    RoomList {
+        /// List of available room names.
+        rooms: Vec<String>,
+    },
     /// Server sends historical messages for a room.
     RoomHistory {
+        /// Name of the room this history belongs to.
         room: String,
+        /// Historical messages for the requested page.
         messages: Vec<HistoryEntry>,
         /// True when more messages are available beyond this chunk.
         has_more: bool,
@@ -120,7 +196,12 @@ pub enum ServerMessage {
     /// Logout succeeded. The peer is now unauthenticated.
     LogoutOk,
     /// Generic server-side error.
-    Error { message: String, code: String },
+    Error {
+        /// Human-readable error message.
+        message: String,
+        /// Machine-readable error code (e.g. "ROOM_NOT_FOUND").
+        code: String,
+    },
 }
 
 fn validate_non_empty(value: &str, field: &str) -> Result<()> {
@@ -438,11 +519,19 @@ fn text_payload(data: Message) -> Result<String> {
     }
 }
 
+/// Serialize a client message to a JSON string.
+///
+/// Validates and normalizes the message fields before serialization.
+/// Returns an error if any field fails validation.
 pub fn serialize_client_message(message: &ClientMessage) -> Result<String> {
     let message = normalized_client_message(message)?;
     Ok(serde_json::to_string(message.as_ref())?)
 }
 
+/// Serialize a server message to a JSON string.
+///
+/// Validates the message fields before serialization and checks that the
+/// resulting JSON does not exceed `MAX_PAYLOAD_LEN`.
 pub fn serialize_server_message(message: &ServerMessage) -> Result<String> {
     validate_server_message(message)?;
     let json = serde_json::to_string(message)?;
@@ -456,6 +545,10 @@ pub fn serialize_server_message(message: &ServerMessage) -> Result<String> {
     Ok(json)
 }
 
+/// Parse a WebSocket text message into a `ClientMessage`.
+///
+/// Reads the raw `Message`, extracts the text payload, deserializes it as
+/// JSON, and validates all fields. Returns an error for any invalid input.
 pub fn parse_client_message(data: Message) -> Result<ClientMessage> {
     let payload = text_payload(data)?;
     let mut message = serde_json::from_str(&payload)?;
@@ -463,6 +556,10 @@ pub fn parse_client_message(data: Message) -> Result<ClientMessage> {
     Ok(message)
 }
 
+/// Parse a WebSocket text message into a `ServerMessage`.
+///
+/// Reads the raw `Message`, extracts the text payload, deserializes it as
+/// JSON, and validates all fields. Returns an error for any invalid input.
 pub fn parse_server_message(data: Message) -> Result<ServerMessage> {
     let payload = text_payload(data)?;
     let message = serde_json::from_str(&payload)?;
@@ -470,14 +567,24 @@ pub fn parse_server_message(data: Message) -> Result<ServerMessage> {
     Ok(message)
 }
 
+/// Serialize a login message payload for sending to the server.
+///
+/// Helper that constructs a `ClientMessage::Login` and serializes it to JSON.
 pub fn create_login(login: String, passwd: String) -> Result<String> {
     serialize_client_message(&ClientMessage::Login { login, passwd })
 }
 
+/// Serialize a create-account message payload for sending to the server.
+///
+/// Helper that constructs a `ClientMessage::CreateAccount` and serializes it to JSON.
 pub fn create_account(login: String, passwd: String) -> Result<String> {
     serialize_client_message(&ClientMessage::CreateAccount { login, passwd })
 }
 
+/// Serialize an incoming message server payload for sending to clients.
+///
+/// Helper that constructs a `ServerMessage::IncomingMessage` with id=0
+/// (used by test helpers) and serializes it to JSON.
 pub fn create_incoming_message(
     login: String,
     room: String,

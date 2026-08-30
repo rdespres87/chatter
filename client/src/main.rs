@@ -1,3 +1,9 @@
+//! WebSocket chat client with a desktop GUI built on egui.
+//!
+//! The client connects to the server via WebSocket, handles authentication
+//! (login/register), room management, real-time messaging, and automatic
+//! reconnection with exponential backoff.
+
 mod app;
 mod events;
 mod utils;
@@ -67,7 +73,9 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+/// Wraps `App` in an `Arc<Mutex<>>` for `eframe::App` trait implementation.
 struct AppWrapper {
+    /// Shared mutable application state.
     inner: Arc<Mutex<App>>,
 }
 
